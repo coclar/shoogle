@@ -1,0 +1,26 @@
+# Ephemeris from Clark et al. 2023
+PSRJ          J1526-2744
+RAJ           15:26:45.102334459669322    1
+DECJ         -27:44:05.948374670079772    1    
+PMRA          0                           1
+PMDEC         0                          1
+F0            401.744602097458            1
+F1           -5.70952818576634e-16        1
+PB            0.202810828312421           1
+A1            0.22409900589693            1
+TASC          59303.2059754116            1
+EPS1          0                           1
+EPS2          0                           1
+BINARY        ELL1
+PEPOCH        59355.468037
+POSEPOCH      57078.5
+START         54681.0
+FINISH        59476.0
+TZRSITE       @
+TZRFRQ        0
+TZRMJD        59355.468037
+EPHVER        5
+CLK           TT(TAI)
+UNITS         TDB
+EPHEM         DE421
+CORRECT_TROPOSPHERE     N

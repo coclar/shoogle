@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools >= 77.0.3"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "shoogle"
+version = "0.0.1"
+authors = [
+  { name="Colin Clark", email="colin.clark@aei.mpg.de" },
+  { name="Serena Valtolina", email="svaltolina@mpifr-bonn.mpg.de" },
+  { name="Lars Nieder", email="lars.nieder@aei.mpg.de" },
+  { name="Rutger van Haasteren", email="rutger.v.haasteren@aei.mpg.de" },
+  
+]
+description = "A Gibbs sampler for timing gamma-ray pulsars"
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Science/Research"
+]
+license = "BSD-3-Clause"
+license-files = ["LICEN[CS]E*","OSS*pdf","AUTHORS.md","CONTRIBUTING.md"]
+
+dependencies = [
+    "pint-pulsar>=1.0.0",
+    "numpy>=1.23.0",
+    "astropy>=5.0.5",
+    "scipy>=1.9.0",
+    "matplotlib>=3.4.3",
+    "emcee>=3.0.1",
+    "corner>=2.0.1",
+    "scikit-learn>=1.5.1",
+    "tqdm>=4.67.1"
+]
+
+[project.optional-dependencies]
+nb = ["jupyterlab","ipywidgets","widgetsnbextension"]
+
+[project.urls]
+Homepage = "https://github.com/coclar/shoogle"
+Issues = "https://github.com/coclar/shoogle/issues"
+
+[project.scripts]
+run_shoogle = "shoogle.scripts.run_shoogle:main"
+plot_shoogle = "shoogle.scripts.plot_shoogle:main"

@@ -1,0 +1,126 @@
+PSR                            J1959+2048
+EPHEM                               DE421
+CLOCK                             TT(TAI)
+UNITS                                 TDB
+START                         54683.36598
+FINISH                        59253.15683
+DILATEFREQ                              N
+DMDATA                                0.0
+NTOA                                  0.0
+CHI2                                  0.0
+RAJ                     19:59:36.74288149 1
+DECJ                    20:48:14.48351639 1
+PMRA                  -15.800152692852908 1
+PMDEC                 -25.426989105100827 1
+PX                                    0.0
+POSEPOCH           57205.0000000000000000
+F0                  622.12202637204948275 1
+F1              -6.510550811322704846e-15 1
+PEPOCH             55555.0000000000000000
+PLANET_SHAPIRO                          N
+BINARY ELL1
+A1                    0.08922611680652867 1
+FB0             3.0301260632650172425e-05 1
+FB1             0                         1
+TASC               56572.9751121063742012 1
+EPS1                                  0.0 1
+EPS2                                  0.0 1
+ORBWAVE_EPOCH 57001
+ORBWAVE_OM 1.5689685329333612e-08
+ORBWAVEC0  0
+ORBWAVES0  0
+ORBWAVEC1  0
+ORBWAVES1  0
+ORBWAVEC2  0
+ORBWAVES2  0
+ORBWAVEC3  0
+ORBWAVES3  0
+ORBWAVEC4  0
+ORBWAVES4  0
+ORBWAVEC5  0
+ORBWAVES5  0
+ORBWAVEC6  0
+ORBWAVES6  0
+ORBWAVEC7  0
+ORBWAVES7  0
+ORBWAVEC8  0
+ORBWAVES8  0
+ORBWAVEC9  0
+ORBWAVES9  0
+ORBWAVEC10 0
+ORBWAVES10 0
+ORBWAVEC11 0
+ORBWAVES11 0
+ORBWAVEC12 0
+ORBWAVES12 0
+ORBWAVEC13 0
+ORBWAVES13 0
+ORBWAVEC14 0
+ORBWAVES14 0
+ORBWAVEC15 0
+ORBWAVES15 0
+ORBWAVEC16 0
+ORBWAVES16 0
+ORBWAVEC17 0
+ORBWAVES17 0
+ORBWAVEC18 0
+ORBWAVES18 0
+ORBWAVEC19 0
+ORBWAVES19 0
+ORBWAVEC20 0
+ORBWAVES20 0
+ORBWAVEC21 0
+ORBWAVES21 0
+ORBWAVEC22 0
+ORBWAVES22 0
+ORBWAVEC23 0
+ORBWAVES23 0
+ORBWAVEC24 0
+ORBWAVES24 0
+ORBWAVEC25 0
+ORBWAVES25 0
+ORBWAVEC26 0
+ORBWAVES26 0
+ORBWAVEC27 0
+ORBWAVES27 0
+ORBWAVEC28 0
+ORBWAVES28 0
+ORBWAVEC29 0
+ORBWAVES29 0
+OPV_REDAMP       -7.5                      1
+OPV_REDFC        -1.0                      1
+OPV_REDGAM       4.0                       1
+WXEPOCH            57001
+WXFREQ_0001        0.00021560446043368688
+WXSIN_0001                            0.0 1
+WXCOS_0001                            0.0 1
+WXFREQ_0002        0.00043120892086737376
+WXSIN_0002                            0.0 1
+WXCOS_0002                            0.0 1
+WXFREQ_0003         0.0006468133813010606
+WXSIN_0003                            0.0 1
+WXCOS_0003                            0.0 1
+WXFREQ_0004         0.0008624178417347475
+WXSIN_0004                            0.0 1
+WXCOS_0004                            0.0 1
+WXFREQ_0005         0.0010780223021684345
+WXSIN_0005                            0.0 1
+WXCOS_0005                            0.0 1
+WXFREQ_0006         0.0012936267626021212
+WXSIN_0006                            0.0 1
+WXCOS_0006                            0.0 1
+WXFREQ_0007         0.0015092312230358081
+WXSIN_0007                            0.0 1
+WXCOS_0007                            0.0 1
+WXFREQ_0008          0.001724835683469495
+WXSIN_0008                            0.0 1
+WXCOS_0008                            0.0 1
+WXFREQ_0009          0.001940440143903182
+WXSIN_0009                            0.0 1
+WXCOS_0009                            0.0 1
+WXFREQ_0010          0.002156044604336869
+WXSIN_0010                            0.0 1
+WXCOS_0010                            0.0 1
+TN_REDAMP        -13                       1
+TN_REDFC         -1.95                     0
+TN_REDGAM        4.333333                  0
