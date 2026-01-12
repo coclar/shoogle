@@ -1,5 +1,5 @@
 ## Developer Certificate of Origin
-
+64;2500;0c
 See [developercertificate.org](https://developercertificate.org/):
 
 ```plaintext
@@ -43,7 +43,7 @@ By making a contribution to this project, I certify that:
 If you would like to extend, correct or modify shoogle, please follow these instructions to obtain an editable installation:
 
 ```
-git clone https://gitlab.aei.uni-hannover.de/cclark/shoogle.git
+git clone https://github.com/coclar/shoogle.git
 cd shoogle
 pip install -e .
 ```

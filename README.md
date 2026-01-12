@@ -6,22 +6,15 @@ The full method is described in the shoogle paper: <link>
 
 ## Installation
 
-Eventually, we should make shoogle installable via
 ```
-pip install shoogle
+pip install shoogle-pulsar
 ```
 
-For now, do:
-```
-git clone https://gitlab.aei.uni-hannover.de/cclark/shoogle.git
-cd shoogle
-pip install .
-```
 (ideally after creating and/or activating a dedicated virtual environment)
 
 ## Usage
 
-After running `pip install [-e] .`, the scripts `run_shoogle` and `plot_shoogle` will be added to your PATH, and should be available whenever your python environment is activated.
+After installation, the scripts `run_shoogle` and `plot_shoogle` will be added to your PATH, and should be available whenever your python environment is activated.
 
 ### Running the sampler
 
