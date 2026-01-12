@@ -1,5 +1,5 @@
 ## Developer Certificate of Origin
-64;2500;0c
+
 See [developercertificate.org](https://developercertificate.org/):
 
 ```plaintext
