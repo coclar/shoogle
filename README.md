@@ -5,7 +5,7 @@ Shoogle is a python package for timing gamma-ray pulsars using Fermi-LAT data. I
 The full method is described in the shoogle paper:
 
 _Timing Gamma-ray Pulsars using Gibbs Sampling_  
-Clark, C. J., Valtolina, S., Nieder, N. and van Haasteren, R.  
+Clark, C. J., Valtolina, S., Nieder, L. and van Haasteren, R.  
 (2026), A&A, submitted, [arXiv:2601.07592](https://arxiv.org/abs/2601.07592)
 
 Please cite our paper if you use shoogle in your work.
