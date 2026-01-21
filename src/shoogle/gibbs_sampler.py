@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import corner
 import emcee
 from tqdm.auto import tqdm
+import time
 
 from astropy import units as u
 
@@ -26,7 +27,7 @@ pint.logging.setup(level="WARNING")
 from shoogle.plot_gibbs_results import GibbsResults, fermi_lc
 from shoogle.utils import *
 from shoogle.noise_models import BrokenPowerLaw, FlatTailBrokenPowerLaw
-
+from shoogle.conditional_samplers import TemplateSampler, LatentVariableSampler
 
 def read_input_ft1_file(infile, FT2, weightfield, wmin, ephem_str):
 
@@ -142,8 +143,10 @@ class Gibbs(object):
                 if l.split()[0] == "LATPHASE":
                     extra_phase = float(l.split()[1])
 
-        self._read_pulse_profile_template(templatefile, extra_phase=extra_phase)
-        self._setup_peaks()
+        self.tau_sampler = TemplateSampler(templatefile,self.w)
+        self.npeaks = self.tau_sampler.npeaks
+
+        self.zm_sampler = LatentVariableSampler(self.w, self.npeaks)
 
         print("Constructing design matrix")
         self._make_design_matrix()
@@ -293,218 +296,6 @@ class Gibbs(object):
 
         return
 
-    def _read_pulse_profile_template(self, prof_file, extra_phase=None):
-
-        if ".pickle" in prof_file:
-            with open(prof_file, "rb") as input_file:
-                self.template = pickle.load(input_file)
-                input_file.close()
-        else:
-            primitives, norms = prim_io(prof_file)
-            self.template = LCTemplate(primitives, norms)
-
-        if extra_phase:
-            for prim in self.template.primitives:
-                new_location = (prim.get_location() + extra_phase) % 1
-                prim.set_location(new_location)
-
-        self.A_0 = np.array([A for A in self.template.norms()])
-        self.mu_0 = np.mod(
-            np.array([p.get_location() for p in self.template.primitives]), 1.0
-        )
-        self.sigma_0 = np.array([p.get_width() for p in self.template.primitives])
-        self.npeaks = len(self.A_0)
-
-    def _setup_peaks(self, phase_shifts=None):
-
-        if phase_shifts is None:
-            phase_shifts = np.zeros_like(self.phi)
-
-        # Prior probability that each photon came from each peak
-        self.A_ik = self.w[:, None] * self.A_0[None, :]
-
-        # Prior probability that each photon came from the pulsar's unpulsed component
-        self.U_i = self.w * (1 - np.sum(self.A_0))
-
-        # Prior probability that the photon came from the background
-        self.B_i = 1 - self.w
-
-        norm = np.sum(self.A_ik, axis=1) + self.U_i + self.B_i  # should be unity
-        assert np.allclose(
-            norm, 1.0
-        ), f"Norms don't all add up to one. (Max = {np.max(norm)},min = {np.min(norm)})."
-
-        # Account for phase wraps by shifting peak centres to nearest rotation to each photon,
-        # according to the previous timing solution.
-        # mu_ik = self.mu_0[None, :] + np.round(
-        #     self.phi[:, None] - phase_shifts[:, None] - self.mu_0[None, :]
-        # )
-        # self.mu_ik = mu_ik
-
-        self.log_Aik = np.log(self.A_ik)
-        self.log_sigma_0 = np.log(self.sigma_0)
-        self.inv_sigma_0_sq = 1.0 / self.sigma_0**2
-
-        return
-
-    def _template_loglikelihood(self, phase_shifts):
-
-        phases = np.mod(self.phi - phase_shifts, 1.0)
-        L = np.sum(np.log(1 - self.w + self.w * self.template(phases)))
-        return L
-
-    def _tau_emcee_logL_wrapper(self, x, phase_shifts):
-
-        if np.any(x[: self.npeaks] > 1.0) or np.any(x[: self.npeaks] < 0.0):
-            return -np.inf
-
-        self.A_0 = np.copy(x[: self.npeaks])
-
-        # Parameter transform ensures sum(A_0) < 1
-        R = 1
-        for i in range(self.npeaks):
-            self.A_0[i] = x[i] * R
-            R -= self.A_0[i]
-
-        self.mu_0 = x[self.npeaks : self.npeaks * 2]
-        self.sigma_0 = np.exp(x[2 * self.npeaks : self.npeaks * 3])
-
-        if np.any(self.sigma_0 < 0.001):
-            return -np.inf
-
-        try:
-            gaussians = []
-            for i in range(self.npeaks):
-                gaussians.append(
-                    LCGaussian(p=[self.sigma_0[i], np.mod(self.mu_0[i], 1.0)])
-                )
-
-            self.template = LCTemplate(gaussians, norms=self.A_0)
-        except ValueError:
-            return -np.inf
-
-        L = self._template_loglikelihood(phase_shifts)
-
-        if np.isnan(L):
-            return -np.inf
-
-        return L
-
-    def _tune_tau_sampler(self, phase_shifts, progress=True):
-
-        plt.ioff()
-
-        T = 1.0
-        A_x = np.copy(self.A_0)
-
-        for i in range(self.npeaks):
-            A_x[i] = self.A_0[i] / T
-            T -= self.A_0[i]
-
-        x0 = np.concatenate((A_x, self.mu_0, np.log(self.sigma_0)))
-        nwalkers = self.npeaks * 12
-
-        sampler = emcee.EnsembleSampler(
-            nwalkers,
-            self.npeaks * 3,
-            self._tau_emcee_logL_wrapper,
-            args=(phase_shifts,),
-        )
-
-        start = np.zeros((nwalkers, self.npeaks * 3))
-        for walker in range(nwalkers):
-            logL = np.inf
-            while np.isinf(logL):
-                start[walker] = mvn.rvs(
-                    size=1, mean=x0, cov=np.eye(self.npeaks * 3) * 0.0001
-                )
-                logL = self._tau_emcee_logL_wrapper(start[walker], phase_shifts)
-
-        sampler.run_mcmc(
-            start,
-            1000,
-            progress=progress,
-            progress_kwargs={"desc": "Tuning template sampler, step 1 of 2"},
-        )
-
-        nwalkers = 1
-        chain = sampler.get_chain(discard=500, flat=True)
-        cov = np.cov(chain, rowvar=False)
-
-        sampler2 = emcee.EnsembleSampler(
-            1,
-            self.npeaks * 3,
-            self._tau_emcee_logL_wrapper,
-            args=(phase_shifts,),
-            live_dangerously=True,
-            moves=[emcee.moves.GaussianMove(cov)],
-        )
-
-        x1 = chain[-1, :]
-        sampler2.run_mcmc(
-            x1,
-            20000,
-            progress=progress,
-            skip_initial_state_check=True,
-            progress_kwargs={"desc": "Tuning template sampler, step 2 of 2"},
-        )
-
-        chain2 = sampler2.get_chain(flat=True, discard=1000)
-        cov = np.cov(chain2, rowvar=False)
-
-        try:
-            autocorr_time = np.max(sampler2.get_autocorr_time(discard=1000))
-            if np.isnan(autocorr_time):
-                print(
-                    "Warning: Computed autocorrelation time is NaN. Setting tau_autocorr_time to 400."
-                )
-                self.tau_autocorr_time = int(400)
-            else:
-                self.tau_autocorr_time = int(autocorr_time)
-        except emcee.autocorr.AutocorrError:
-            print("autocorr computation failed. Setting tau_autocorr_time to 400.")
-
-        self.tau_emcee_cov = cov
-
-    def _sample_tau_given_theta(self, phase_shifts):
-
-        T = 1.0
-        A_x = np.copy(self.A_0)
-        for i in range(self.npeaks):
-            A_x[i] = self.A_0[i] / T
-            T -= self.A_0[i]
-
-        x0 = np.concatenate((A_x, self.mu_0, np.log(self.sigma_0)))
-
-        sampler = emcee.EnsembleSampler(
-            1,
-            self.npeaks * 3,
-            self._tau_emcee_logL_wrapper,
-            args=(phase_shifts,),
-            live_dangerously=True,
-            moves=[emcee.moves.GaussianMove(self.tau_emcee_cov)],
-        )
-
-        sampler.run_mcmc(
-            x0,
-            self.tau_autocorr_time,
-            progress=False,
-            skip_initial_state_check=True,
-        )
-
-        tau_new = sampler.get_chain(flat=True)[-1, :]
-
-        R = 1.0
-        for i in range(self.npeaks):
-            self.A_0[i] = tau_new[i] * R
-            R -= self.A_0[i]
-
-        self.mu_0 = tau_new[self.npeaks : self.npeaks * 2]
-        self.sigma_0 = np.exp(tau_new[2 * self.npeaks : self.npeaks * 3])
-        self._setup_peaks(phase_shifts)
-
-        return self.A_0, self.mu_0, self.sigma_0
-
     def _lambda_emcee_logL_wrapper(self, x):
 
         hyp = np.array([])
@@ -559,9 +350,7 @@ class Gibbs(object):
 
         return logL + log_prior
 
-    def _tune_lambda_sampler(self, z, hyp0, progress=True):
-
-        self._setup_leastsq_given_z_tau(z)
+    def _tune_lambda_sampler(self, hyp0, progress=True):
 
         x0 = np.array([])
         for component in self.noise_models:
@@ -614,9 +403,7 @@ class Gibbs(object):
         )
         self.lambda_emcee_cov = cov
 
-    def _sample_lambda_given_z_tau(self, z, x0):
-
-        self._setup_leastsq_given_z_tau(z)
+    def _sample_lambda_given_z_tau(self, x0):
 
         ndim = len(x0)
 
@@ -655,121 +442,19 @@ class Gibbs(object):
         theta = self.theta_opt + solve(self.post_cov_inv_U, p)
         phase_shifts = self.M @ theta
         mean_phase_shift = np.mean(phase_shifts)
-
-        pulsed_photons = np.where(z < self.npeaks)[0]
-        resids = np.asarray((self.phi - phase_shifts)[pulsed_photons], dtype=float)
-
-        # plt.ioff()
-        # plt.title('Postfit')
-        for k in range(self.npeaks):
-            peak_photons = np.where(z[pulsed_photons] == k)[0]
-            resids[peak_photons] -= (
-                self.mu_0[k] + self.wraps[pulsed_photons][peak_photons]
-            )
+        phase_shifts -= mean_phase_shift
 
         if hasattr(self, "radio_toas"):
             radio_phase_shifts = self.Mradio @ (theta - self.theta_prior)
             resids = np.append(resids, self.radio_resids - radio_phase_shifts)
             radio_phase_shifts -= mean_phase_shift
 
-        phase_shifts -= mean_phase_shift
-        self.postfit_resids = resids
-        self.postfit_chi2 = np.sum(self.Sigma_inv * self.postfit_resids**2)
-        self.prior_chi2 = np.sum(np.diag(self.inv_prior_cov) * self.theta_opt**2)
-
         return theta, phase_shifts
 
-    def _p_z_given_theta_tau(self, phase_shifts):
+    def _setup_leastsq_given_z_tau(self, z, m, tau):
 
-        resid_phase = self.phi - phase_shifts
-
-        # Use wrapped Gaussian function to work out photon--component probabilities
-        # Wraps for individual photons will be randomly assigned in a later stage
-        wraps = np.arange(-1, 2, 1)
-
-        log_rho_ik = (
-            self.log_Aik[:, :, None]
-            - self.log_sigma_0[None, :, None]
-            - 0.5 * np.log(2 * np.pi)
-            - 0.5
-            * (
-                (
-                    resid_phase[:, None, None]
-                    - self.mu_0[None, :, None]
-                    - wraps[None, None, :]
-                )
-                ** 2
-                * self.inv_sigma_0_sq[None, :, None]
-            )
-        )
-
-        # This sums over phase wraps for each component
-        rho_ik = np.sum(np.exp(log_rho_ik), axis=-1)
-
-        sum_rho = np.sum(rho_ik, axis=1) + self.U_i + self.B_i
-        self.rho_ik = rho_ik / sum_rho[:, None]
-        self.rho_iU = self.U_i / sum_rho
-        self.rho_iB = self.B_i / sum_rho
-
-    def _sample_z_given_theta_tau(self, phase_shifts):
-
-        self._p_z_given_theta_tau(phase_shifts)
-
-        n_in_peak = np.zeros(self.npeaks, dtype="int")
-
-        C = np.cumsum(
-            np.concatenate(
-                (self.rho_ik, self.rho_iU[:, None], self.rho_iB[:, None]), axis=1
-            ),
-            axis=1,
-        )
-
-        z = np.ones(self.nphot, dtype="int") * (self.npeaks + 1)
-        u = np.random.rand(self.nphot)
-
-        for k in range(self.npeaks + 1):
-            mask = np.where((u < C[:, k]) & (z > self.npeaks))[0]
-            if len(mask) > 0:
-                z[mask] = k
-
-        for k in range(self.npeaks):
-            n_in_peak[k] = np.sum(z == k)
-
-        resid_phase = self.phi - phase_shifts
-
-        # For photons near the boundary of a phase wrap,
-        # randomly assign the photon to a particular rotation
-        self.wraps = np.zeros(self.nphot)
-
-        for k in range(self.npeaks):
-            mask = np.where(z == k)[0]
-
-            wraps = np.arange(-1, 2, 1)
-            log_rho_wraps = (
-                self.log_Aik[mask, k, None]
-                - self.log_sigma_0[k]
-                - 0.5 * np.log(2 * np.pi)
-                - 0.5
-                * (
-                    (resid_phase[mask, None] - self.mu_0[k, None] - wraps[None, :]) ** 2
-                    * self.inv_sigma_0_sq[k]
-                )
-            )
-
-            rho_wraps = np.exp(log_rho_wraps)
-            rho_wraps /= np.sum(rho_wraps, axis=1)[:, None]
-
-            C_wraps = np.cumsum(rho_wraps, axis=1)
-
-            u = np.random.rand(len(mask))
-
-            wraps = np.where(u < C_wraps[:, 0], -1, np.where(u < C_wraps[:, 1], 0, 1))
-
-            self.wraps[mask] += wraps
-
-        return z
-
-    def _setup_leastsq_given_z_tau(self, z):
+        mu = tau[self.npeaks:self.npeaks * 2]
+        sigma = tau[self.npeaks * 2:]
 
         npar = self.n_timing_pars
 
@@ -781,14 +466,14 @@ class Gibbs(object):
         M = np.copy(self.M[pulsed_photons])
         resids = np.asarray(self.phi[pulsed_photons], dtype=float)
         precisions = np.zeros_like(resids)
-        wraps = np.copy(self.wraps[pulsed_photons])
+        wraps = np.copy(m[pulsed_photons])
 
         # plt.ioff()
         # plt.title('Prefit')
         for k in range(self.npeaks):
             peak_photons = np.where(z[pulsed_photons] == k)[0]
-            resids[peak_photons] -= wraps[peak_photons] + self.mu_0[k]
-            precisions[peak_photons] = self.inv_sigma_0_sq[k]
+            resids[peak_photons] -= wraps[peak_photons] + mu[k]
+            precisions[peak_photons] = 1.0/sigma[k] ** 2
 
         #     plt.errorbar(self.t[pulsed_photons][peak_photons],resids[peak_photons],yerr=1.0/np.sqrt(precisions[peak_photons]),color=f'C{k}',ls='none')
         # plt.show()
@@ -808,10 +493,10 @@ class Gibbs(object):
         self.MT_Sigma_inv_resids = MT_Sigma_inv @ resids
         self.sum_precisions = np.sum(precisions)
 
-    def _Htest_logL(self, phase_shifts):
+    def _Htest_logL(self, tau, phase_shifts):
 
         phi = np.mod(self.phi - phase_shifts, 1.0)
-        logL = np.sum(np.log((1 - self.w) + self.w * self.template(phi)))
+        logL = np.sum(np.log((1 - self.w) + self.w * self.tau_sampler.template(tau,phi)))
 
         return hmw(phi, self.w), logL
 
@@ -1124,7 +809,7 @@ class Gibbs(object):
 
     def sample(
         self,
-        ntau_target=100,
+        n_acor_target=100,
         update=100,
         max_iterations=1000000,
         plots=False,
@@ -1196,9 +881,10 @@ class Gibbs(object):
         fermi_lc(np.mod(self.phi, 1.0), self.w, ax=ax[0], xbins=100)
         S = np.sum(self.w**2) / 100
         B = np.sum(self.w * (1 - self.w)) / 100
-        ax[0].plot(p, B + S * self.template(p), color="orange")
+        template = self.tau_sampler.template(self.tau_sampler.tau_0, p)
+        ax[0].plot(p, B + S * template, color="orange")
         ax[0].set_xlim(0.0, 1.0)
-        ax[0].set_ylim(0.0, B + S * self.template(p).max() * 1.05)
+        ax[0].set_ylim(0.0, B + S * template.max() * 1.05)
         ax[1].set_xlabel("Spin phase")
         ax[1].set_ylabel("Time (MJD)")
         try:
@@ -1214,12 +900,9 @@ class Gibbs(object):
         if resume is True:
             dat = np.load(outputfile + ".npz")
             self.template_chain = dat["template_chain"]
-            self.tau_emcee_cov = dat["tau_emcee_cov"]
-            self.tau_autocorr_time = dat["tau_autocorr_time"]
 
-            self.A_0 = self.template_chain[-1, : self.npeaks]
-            self.mu_0 = self.template_chain[-1, self.npeaks : 2 * self.npeaks]
-            self.sigma_0 = self.template_chain[-1, 2 * self.npeaks : 3 * self.npeaks]
+            tau = self.template_chain[-1]
+            self.tau_sampler.setup_sampler(self.phi - phase_shifts)
 
             self.loglike_chain = dat["loglike_chain"]
             if self.nhyp > 0:
@@ -1266,13 +949,16 @@ class Gibbs(object):
             self.loglike_chain = np.zeros(update)
             phase_shifts = np.zeros(self.nphot)
 
-            if not hasattr(self, "tau_emcee_cov"):
-                self._tune_tau_sampler(phase_shifts, progress=True)
+            if not hasattr(self.tau_sampler, "kernel"):
+                tau = self.tau_sampler.setup_sampler(self.phi - phase_shifts)
+            else:
+                tau = self.tau_sampler.tau_0
 
             if self.nhyp > 0:
                 if not hasattr(self, "lambda_emcee_cov"):
-                    z = self._sample_z_given_theta_tau(phase_shifts)
-                    self._tune_lambda_sampler(z, hyp, progress=True)
+                    z,m = self.zm_sampler.sample_z_given_theta_tau(tau, self.phi - phase_shifts)
+                    self._setup_leastsq_given_z_tau(z,m,tau)
+                    self._tune_lambda_sampler(hyp, progress=True)
 
             c = 0
 
@@ -1281,10 +967,13 @@ class Gibbs(object):
             fig, ax = plt.subplots(1, 3, figsize=(15, 5))
         else:
             progress = tqdm(
-                total=ntau_target * update, desc="Gibbs sampling", smoothing=0.0
+                total=n_acor_target * update, desc="Gibbs sampling", smoothing=0.0
             )
+            start_time = time.time()
+            progress.start_t = start_time
+            progress.last_print_t = start_time
 
-        while (c < update or ntau < ntau_target) and (c < max_iterations):
+        while (c < update or n_acor < n_acor_target) and (c < max_iterations):
 
             if c == len(self.loglike_chain):
                 self.loglike_chain = np.append(self.loglike_chain, np.zeros(update))
@@ -1308,19 +997,18 @@ class Gibbs(object):
                     )
 
             # 1) Update template pulse profile
-            A_0, mu_0, sigma_0 = self._sample_tau_given_theta(phase_shifts)
-            templatepars = np.concatenate((self.A_0, self.mu_0, self.sigma_0))
+            tau = self.tau_sampler.draw_one_template(tau, self.phi - phase_shifts)
 
             # 2) Assign photons to components given previous timing model and template pulse prof.
-            z = self._sample_z_given_theta_tau(phase_shifts)
+            z, m = self.zm_sampler.sample_z_given_theta_tau(tau, self.phi - phase_shifts)
+            self._setup_leastsq_given_z_tau(z,m,tau)
 
             # 3) Sample hyperparameters using Metropolis-Hastings on p(lambda | X, tau, z)
             #    (This is marginalised over the timing model)
             if self.nhyp > 0:
-                hyp = self._sample_lambda_given_z_tau(z, hyp)
+                hyp = self._sample_lambda_given_z_tau(hyp)
 
             else:
-                self._setup_leastsq_given_z_tau(z)
                 post_cov_inv = self.MT_Sigma_inv_M + self.inv_prior_cov
                 post_cov_inv_U = cholesky(post_cov_inv, lower=False)
 
@@ -1337,7 +1025,7 @@ class Gibbs(object):
             (theta, phase_shifts) = self._sample_theta_given_lambda_z_tau(z)
 
             chi2 = np.sum((theta - self.theta_prior) ** 2 * self.inv_prior_cov)
-            Htest, logL = self._Htest_logL(phase_shifts)
+            Htest, logL = self._Htest_logL(tau,phase_shifts)
             logpost = logL - 0.5 * chi2 - 0.5 * self.logdet_prior
 
             if plots:
@@ -1357,7 +1045,7 @@ class Gibbs(object):
 
             self.loglike_chain[c] = logpost
             self.timing_chain[c] = theta[: self.n_timing_pars]
-            self.template_chain[c] = templatepars
+            self.template_chain[c] = tau
 
             if self.has_OPV:
                 self.opv_amps_chain[c] = theta[self.n_timing_pars :]  # -self.npeaks]
@@ -1375,8 +1063,6 @@ class Gibbs(object):
                     "parameter_names": self.timing_parameter_names,
                     "timing_parameter_values": self.timing_parameter_values,
                     "timing_parameter_uncertainties": self.timing_parameter_uncertainties,
-                    "tau_emcee_cov": self.tau_emcee_cov,
-                    "tau_autocorr_time": self.tau_autocorr_time,
                 }
 
                 if self.has_OPV:
@@ -1396,12 +1082,11 @@ class Gibbs(object):
 
                 np.savez(outputfile, **output_dict)
 
-                start = 0  # np.minimum(c//2,tau * 20)
+                start = 0
 
-                all_chains = self.timing_chain[start:c]
-                # all_chains = np.concatenate(
-                #     (self.timing_chain[start:c], self.template_chain[start:c]), axis=1
-                # )
+                all_chains = np.concatenate(
+                    (self.timing_chain[start:c], self.template_chain[start:c]), axis=1
+                )
 
                 if self.nhyp > 0:
                     all_chains = np.concatenate(
@@ -1430,21 +1115,25 @@ class Gibbs(object):
                         axis=1,
                     )
 
-                tau, j = acor(all_chains)
+                acor_time, j = acor(all_chains)
 
                 if plots:
                     print(
                         c,
                         "Autocorr time = ",
-                        tau,
+                        acor_time,
                         "Estimated steps required:",
-                        tau * ntau_target,
+                        acor_time * n_acor_target,
                     )
                     sys.stdout.flush()
                 else:
-                    progress.total = tau * ntau_target
+                    progress.reset(total = acor_time * n_acor_target)
+                    progress.start_t = start_time
+                    progress.last_print_t = start_time
+                    progress.update(c)
+                    progress.refresh()
 
-                ntau = (c - start) / tau
+                n_acor = (c - start) / acor_time
 
                 if plots:
                     ax[0].clear()
@@ -1453,7 +1142,7 @@ class Gibbs(object):
                         param = (
                             self.timing_chain[:c, i] - np.mean(self.timing_chain[:c, i])
                         ) / np.std(self.timing_chain[:c, i])
-                        ax[0].plot(i * 5 + param, color="black")  # [::tau//2])
+                        ax[0].plot(i * 5 + param, color="black")
 
                     for i in range(self.npeaks * 3):
                         param = (
@@ -1477,11 +1166,10 @@ class Gibbs(object):
                     ax[1].plot(self.loglike_chain[:c])
                     ax[1].set_xlabel("Iteration")
                     ax[1].set_ylabel("Loglikelihood")
-                    ax[2].scatter(c, tau * ntau_target, color="red")
+                    ax[2].scatter(c, acor_time * n_acor_target, color="red")
                     ax[2].scatter(c, (c - start), color="green", marker="^")
                     ax[2].set_xlabel("Iteration")
                     ax[2].set_ylabel("Estimated iterations required")
-                    # ax[2].plot([0,c//2],[0,tau * 50],color='black',ls='--')
 
                     plt.pause(0.01)
                     plt.draw()
@@ -1490,6 +1178,7 @@ class Gibbs(object):
             c += 1
             if not plots:
                 progress.update(1)
+                progress.refresh()
 
         plt.ioff()
         plt.show()
