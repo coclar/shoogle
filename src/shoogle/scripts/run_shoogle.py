@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 from shoogle.gibbs_sampler import Gibbs
 from shoogle.plot_gibbs_results import GibbsResults
 
+
 def main(argv=None):
 
     desc = "Fit a Gaussian process orbital phase model to pulsar data"
@@ -63,7 +64,7 @@ def main(argv=None):
     )
     parser.add_option(
         "-n",
-        "--ntau",
+        "--nacor",
         type=int,
         default=10,  # 10000
         help="Number of autocorrelation times desired in chain",
@@ -82,10 +83,17 @@ def main(argv=None):
         default=1000000,
         help="Maximum number of Gibbs sampling steps to take before exiting.",
     )
+    parser.add_option(
+        "-E",
+        "--Edep",
+        action="store_true",
+        default=False,
+        help="Fit for energy-dependence in the template pulse profile",
+    )
     (options, args) = parser.parse_args(argv)
 
     if options.outputfile is None:
-        print("Error: -o/--outputfile is a required argument",file=sys.stderr)
+        print("Error: -o/--outputfile is a required argument", file=sys.stderr)
         sys.exit(1)
 
     G = Gibbs(
@@ -96,13 +104,14 @@ def main(argv=None):
         weightfield=options.weightfield,
         templatefile=options.template,
         wmin=options.weightcut,
+        Edep=options.Edep,
     )
 
     G.sample(
         outputfile=options.outputfile,
         plots=(not options.quiet),
         max_iterations=options.max_iterations,
-        ntau_target=options.ntau,
+        n_acor_target=options.nacor,
         update=options.update,
     )
 
@@ -121,7 +130,7 @@ def main(argv=None):
         else:
             res.write_new_parfile(options.outputfile + ".par")
 
-        endfile = ".png" 
+        endfile = ".png"
         if G.fit_TN:
             fig1 = res.hyp_corner()
             plt.savefig(

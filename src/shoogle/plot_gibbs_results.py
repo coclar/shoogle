@@ -127,7 +127,8 @@ class GibbsResults(object):
             opv_amps_chain = np.array([]).reshape(0, 2 * self.psr.nOPVfreqs)
 
         hyp_chain = np.array([]).reshape(0, nhyp)
-        template_chain = np.array([]).reshape(0, 3 * self.psr.npeaks)
+
+        template_chain = np.array([]).reshape(0, len(self.psr.tau_sampler.tau_0))
 
         for f in load_from:
             dat = np.load(f)
@@ -184,6 +185,21 @@ class GibbsResults(object):
                 if np.std(mu) > 0.25:
                     mu = np.mod(mu + 0.5, 1.0) - 0.5
                     temp_template_chain[:, self.psr.npeaks + k] = mu
+
+            if self.psr.Edep:
+                p0 = self.psr.npeaks * 3
+                for k in range(self.psr.npeaks):
+                    mu = temp_template_chain[:, p0 + self.psr.npeaks + k]
+
+                    # Peaks close to the wrap can jump either side, let's undo that
+                    if np.std(mu) > 0.25:
+                        mu = np.mod(mu, 1.0)
+                        temp_template_chain[:, p0 + self.psr.npeaks + k] = mu
+
+                    # If that didn't help, undo the undoing!
+                    if np.std(mu) > 0.25:
+                        mu = np.mod(mu + 0.5, 1.0) - 0.5
+                        temp_template_chain[:, p0 + self.psr.npeaks + k] = mu
 
             if decimated:
                 loglike_chain = np.append(loglike_chain, temp_loglike_chain, axis=0)
@@ -295,7 +311,7 @@ class GibbsResults(object):
         e = self.psr.n_timing_pars
         self.timing_MAP = MAP[:e]
         s = self.psr.n_timing_pars
-        n = 3 * self.psr.npeaks
+        n = len(self.psr.tau_sampler.tau_0)
         self.template_MAP = MAP[s : s + n]
 
         if self.psr.fit_TN or self.psr.fit_OPV:
@@ -409,10 +425,21 @@ class GibbsResults(object):
                 )
 
     def write_new_template(self, output_templatefile):
-        A_0 = self.template_MAP[: self.psr.npeaks]
-        mu_0 = self.template_MAP[self.psr.npeaks : 2 * self.psr.npeaks]
-        sigma_0 = self.template_MAP[2 * self.psr.npeaks :]
-        write_template(output_templatefile, A_0, mu_0, sigma_0)
+
+        A = self.template_MAP[: self.psr.npeaks]
+        mu = self.template_MAP[self.psr.npeaks : 2 * self.psr.npeaks]
+        sigma = self.template_MAP[2 * self.psr.npeaks :]
+
+        if self.psr.Edep:
+            write_template(output_templatefile + ".Elo", A, mu, sigma)
+
+            p0 = self.psr.npeaks * 3
+            A = self.template_MAP[p0 : p0 + self.psr.npeaks]
+            mu = self.template_MAP[p0 + self.psr.npeaks : p0 + 2 * self.psr.npeaks]
+            sigma = self.template_MAP[p0 + 2 * self.psr.npeaks :]
+            write_template(output_templatefile + ".Ehi", A, mu, sigma)
+        else:
+            write_template(output_templatefile, A, mu, sigma)
 
     def MAP_phases(self):
 
@@ -510,14 +537,29 @@ class GibbsResults(object):
         mp_array = 1 - np.exp(-0.5 * exp_lev**2)
 
         fig = corner.corner(
-            self.template_chain,
+            self.template_chain[:, : 3 * self.psr.npeaks],
             labels=[f"$A_{i}$" for i in range(self.psr.npeaks)]
             + [f"$\\mu_{i}$" for i in range(self.psr.npeaks)]
             + [f"$\\sigma_{i}$" for i in range(self.psr.npeaks)],
-            truths=self.template_MAP,
+            truths=self.template_MAP[: 3 * self.psr.npeaks],
+            truths_color="C0",
             levels=mp_array,
             bins=30,
+            color="C0",
         )
+        if self.psr.Edep:
+            corner.corner(
+                self.template_chain[:, 3 * self.psr.npeaks :],
+                fig=fig,
+                labels=[f"$A_{i}$" for i in range(self.psr.npeaks)]
+                + [f"$\\mu_{i}$" for i in range(self.psr.npeaks)]
+                + [f"$\\sigma_{i}$" for i in range(self.psr.npeaks)],
+                truths=self.template_MAP[3 * self.psr.npeaks :],
+                truths_color="C1",
+                levels=mp_array,
+                bins=30,
+                color="C1",
+            )
 
         return fig
 
@@ -598,35 +640,60 @@ class GibbsResults(object):
         ax.xaxis.set_tick_params(bottom=True, labelbottom=True)
 
     def plot_templates(self, ax, xbins=50):
-        A = self.template_MAP[: self.psr.npeaks]
-        mu = self.template_MAP[self.psr.npeaks : 2 * self.psr.npeaks]
-        sigma = self.template_MAP[2 * self.psr.npeaks :]
+
+        tau = self.template_MAP
 
         phi_vec = np.arange(0, 1.0, 0.001)
-        template = np.ones_like(phi_vec) * (1 - A.sum())
 
         S = np.sum(self.psr.w**2) / xbins
         B = np.sum(self.psr.w * (1 - self.psr.w)) / xbins
-        for i in range(len(A)):
-            for k in np.arange(-5, 6, 1):
-                template += A[i] * norm.pdf(phi_vec, loc=mu[i] + k, scale=sigma[i])
-        ax.plot(phi_vec, template * S + B, color="orange", lw=1, zorder=10)
+
+        if self.psr.Edep:
+            Eavg = np.average(self.psr.log10E, weights=self.psr.w)
+            ax.plot(
+                phi_vec,
+                self.psr.tau_sampler.template(
+                    tau, phi_vec, np.ones_like(phi_vec) * Eavg
+                )
+                * S
+                + B,
+                color="orange",
+                lw=1,
+                zorder=10,
+            )
+        else:
+            ax.plot(
+                phi_vec,
+                self.psr.tau_sampler.template(tau, phi_vec) * S + B,
+                color="orange",
+                lw=1,
+                zorder=10,
+            )
 
         for i in np.random.choice(
             np.arange(np.shape(self.template_chain)[0]), replace=True, size=100
         ):
-            A_0 = self.template_chain[i, : self.psr.npeaks]
-            mu_0 = self.template_chain[i, self.psr.npeaks : 2 * self.psr.npeaks]
-            sigma_0 = self.template_chain[i, 2 * self.psr.npeaks :]
-
-            template = np.ones_like(phi_vec) * (1 - A_0.sum())
-
-            for i in range(len(A_0)):
-                for k in np.arange(-5, 6, 1):
-                    template += A_0[i] * norm.pdf(
-                        phi_vec, loc=mu_0[i] + k, scale=sigma_0[i]
+            tau = self.template_chain[i, :]
+            if self.psr.Edep:
+                ax.plot(
+                    phi_vec,
+                    self.psr.tau_sampler.template(
+                        tau, phi_vec, np.ones_like(phi_vec) * Eavg
                     )
-            ax.plot(phi_vec, template * S + B, color="black", alpha=0.2, lw=1)
+                    * S
+                    + B,
+                    color="black",
+                    alpha=0.2,
+                    lw=1,
+                )
+            else:
+                ax.plot(
+                    phi_vec,
+                    self.psr.tau_sampler.template(tau, phi_vec) * S + B,
+                    color="black",
+                    alpha=0.2,
+                    lw=1,
+                )
 
     def plot_tasc_shifts(
         self,
@@ -1488,3 +1555,61 @@ class GibbsResults(object):
             ax[0, c].xaxis.tick_top()
 
         return ax
+
+    def plot_Edep_profiles(self, xbins=100):
+
+        Ebounds = np.log10(np.array([100, 300, 1000, 3000, 10000]))
+        Eavg = np.average(self.psr.log10E, weights=self.psr.w)
+
+        xbins = 100
+        phi = np.arange(0.0, 1.0, 0.001)
+        fig, ax = plt.subplots(len(Ebounds) - 1, 1, figsize=(8, 10), sharex=True)
+        for E in range(len(Ebounds) - 1):
+            mask = np.where(
+                (self.psr.log10E > Ebounds[E]) & (self.psr.log10E < Ebounds[E + 1])
+            )
+            fermi_lc(
+                self.phi_MAP[mask],
+                self.psr.w[mask],
+                xbins=xbins,
+                ax=ax[len(Ebounds) - 2 - E],
+                bgcolor="C0",
+            )
+            src = np.sum(self.psr.w[mask] ** 2) / xbins
+            bkg = np.sum(self.psr.w[mask] - self.psr.w[mask] ** 2) / xbins
+
+            for i in np.random.choice(
+                np.arange(np.shape(self.template_chain)[0]), replace=True, size=100
+            ):
+                prof = bkg + src * self.psr.tau_sampler.template(
+                    self.template_chain[i],
+                    phi,
+                    np.ones_like(phi) * 0.5 * (Ebounds[E] + Ebounds[E + 1]),
+                )
+                ax[len(Ebounds) - 2 - E].plot(phi, prof, color="black", alpha=0.1)
+
+            prof = bkg + src * self.psr.tau_sampler.template(
+                self.template_MAP,
+                phi,
+                np.ones_like(phi) * 0.5 * (Ebounds[E] + Ebounds[E + 1]),
+            )
+            ax[len(Ebounds) - 2 - E].plot(
+                phi,
+                prof,
+                color="orange",
+                alpha=1.0,
+                label=f"${10 ** (Ebounds[E] - 3):.2g}\\,{{\\rm GeV}} < E < {10 ** (Ebounds[E+1] - 3):.2g}\\,{{\\rm GeV}}$",
+            )
+            avgprof = bkg + src * self.psr.tau_sampler.template(
+                self.template_MAP, phi, np.ones_like(phi) * Eavg
+            )
+            ax[len(Ebounds) - 2 - E].plot(
+                phi, avgprof, color="red", ls="--", alpha=1.0, label="$E_{\\rm avg}$"
+            )
+            ax[len(Ebounds) - 2 - E].legend(loc="upper right")
+
+        ax[-1].set_xlim(0, 2)
+        ax[-1].xaxis.set_visible(True)
+        ax[-1].set_xlabel("Phase")
+
+        return fig, ax

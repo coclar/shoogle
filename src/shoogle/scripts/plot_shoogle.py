@@ -91,11 +91,8 @@ def main(argv=None):
         res.plot_radio_resids(ax2)
     plt.show()
 
-    res.maxlogL_phases()
-
     if options.output:
         res.write_tvsph(options.output + "_MAP.tvsph", res.phi_MAP)
-        res.write_tvsph(options.output + "_maxlogL.tvsph", res.phi_maxlogL)
         res.write_new_template(options.output + "_prof.dat")
         if res.psr.has_OPV:
             res.write_new_parfile(options.output + "_orbwaves.par")

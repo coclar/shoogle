@@ -1112,9 +1112,10 @@ class Gibbs(object):
 
                 start = 0
 
-                all_chains = np.concatenate(
-                    (self.timing_chain[start:c], self.template_chain[start:c]), axis=1
-                )
+                all_chains = self.timing_chain[start:c]
+                #np.concatenate(
+                #    (self.timing_chain[start:c], self.template_chain[start:c]), axis=1
+                #)
 
                 if self.nhyp > 0:
                     all_chains = np.concatenate(
