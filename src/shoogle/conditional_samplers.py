@@ -165,14 +165,6 @@ class TemplateSampler(object):
 
         return jnp.concatenate((A, mu, sigma)), logprior
 
-    def _log_prior(self, x):
-        """
-        Dummy wrapper for self.samples_to_phys -- this will be superceded by a
-        more complicated function when adding energy-dependence to the template
-        """
-
-        return self._samples_to_phys(x)
-
     def _log_like(self, tau, phases):
         """
         Computes the log-likelihood of the observed photon phases given the
@@ -224,7 +216,7 @@ class TemplateSampler(object):
         log_post   : jnp.float32
                      The log-posterior probability: log_prior + log_likelihood.
         """
-        tau, logprior = self._log_prior(x)
+        tau, logprior = self._samples_to_phys(x)
         loglike = self._log_like(tau, phases)
 
         return logprior + loglike
@@ -311,6 +303,27 @@ class TemplateSampler(object):
         return np.array(tau)
 
     def sample(self, tau, phases, num_samples=1000):
+        """
+        Run the blackjax NUTS sampler to estimate parameters of the template
+
+        Parameters
+        ----------
+
+        tau       :   np.ndarray of dtype float
+                      Template pulse profile parameters
+
+        phases    :   np.ndarray of dtype float
+                      Photon phases
+
+        num_samples : Number of samples to draw, default = 1000
+
+        Returns
+        ----------
+        samples   :   jnp.ndarray of dtype float32
+                      NUTS samples, in the sampling parameter space
+                      These can be converted to physical parameters
+                      using self._samples_to_phys
+        """
 
         x0 = self._phys_to_samples(tau)
 
@@ -319,18 +332,40 @@ class TemplateSampler(object):
         logprob_fn = lambda x: self.logprob_fn(x, phases)
         state = blackjax.nuts.init(x0, logprob_fn)
 
-        samples = np.zeros((num_samples, self.npeaks * 3))
+        samples = np.zeros((num_samples, len(self.tau_0)))
         logL = np.zeros(num_samples)
 
         for step in tqdm(range(num_samples)):
             self.sample_key, key = jax.random.split(self.sample_key)
             state = self.kernel(key, state, phases)
-            samples[step] = np.array(state.position)
+            samples[step], _ = self._samples_to_phys(state.position)
             logL[step] = state.logdensity
 
-        return samples
+        return samples, logL
 
-    def draw_one_template(self, tau, phases, num_steps=10):
+    def sample_tau_given_theta(self, tau, phases, num_steps=10):
+        """
+        Draw a single set of template parameters, given the current photon phases.
+        This is intended to be used to draw single samples from the conditional
+        distribution for Gibbs sampling
+
+
+        Parameters
+        ----------
+
+        tau       :   np.ndarray of dtype float
+                      Template pulse profile parameters
+
+        phases    :   np.ndarray of dtype float
+                      Photon phases
+
+        num_samples : Number of steps to run the chain for, default = 10
+
+        Returns
+        ----------
+        tau   :       np.ndarray of dtype float32
+                      A single set of template pulse profile parameters
+        """
 
         phases = jnp.array(phases)
         logprob_fn = lambda x: self.logprob_fn(x, phases)
@@ -338,7 +373,7 @@ class TemplateSampler(object):
         x = self._phys_to_samples(tau)
         state = blackjax.nuts.init(x, logprob_fn)
 
-        samples = np.zeros((num_steps, self.npeaks * 3))
+        samples = np.zeros((num_steps, len(self.tau_0)))
         logL = np.zeros(num_steps)
 
         for step in range(num_steps):
@@ -350,24 +385,123 @@ class TemplateSampler(object):
         return np.array(tau)
 
 
+class EdepTemplateSampler(TemplateSampler):
+
+    def __init__(
+        self, proffile, weights, log10E, minsigma=0.005, maxsigma=0.25, maxwraps=2
+    ):
+
+        super().__init__(proffile, weights, minsigma, maxsigma, maxwraps)
+
+        self.tau_0 = np.concatenate((self.tau_0, self.tau_0))
+        self.log10E = jnp.array(log10E)
+        self.log10E_frac = (self.log10E - self.log10E.min()) / (
+            self.log10E.max() - self.log10E.min()
+        )
+
+    def template(self, tau, phases, log10E):
+
+        assert (
+            np.sum(tau[: self.npeaks]) <= 1.0
+        ), "Error: sum of template amplitudes > 1"
+
+        tau = jnp.array(tau)
+        phases = jnp.array(phases)
+
+        return self._jax_template(tau, phases, log10E)
+
+    def _jax_template(self, tau, phases, log10E=None):
+
+        if log10E is None:
+            log10E_frac = self.log10E_frac
+        else:
+            log10E_frac = (log10E - self.log10E.min()) / (
+                self.log10E.max() - self.log10E.min()
+            )
+
+        tau_lo = tau[: 3 * self.npeaks]
+        tau_hi = tau[3 * self.npeaks :]
+
+        tau_E = tau_lo[None, :] + log10E_frac[:, None] * (tau_hi - tau_lo)[None, :]
+
+        A_E = tau_E[:, : self.npeaks]
+        mu_E = tau_E[:, self.npeaks : 2 * self.npeaks]
+        sigma_E = tau_E[:, 2 * self.npeaks : 3 * self.npeaks]
+
+        U_E = 1.0 - jnp.sum(A_E, axis=1)
+
+        # Axes are (photons, peaks, wraps)
+        wrapped_resids = (
+            phases[:, None, None] - mu_E[:, :, None] - self.wraps[None, None, :]
+        )
+
+        profile = U_E + jnp.sum(
+            (A_E * ONE_OVER_SQRT2PI / sigma_E)
+            * jnp.sum(
+                jnp.exp(-0.5 * (wrapped_resids / sigma_E[:, :, None]) ** 2), axis=2
+            ),
+            axis=1,
+        )
+
+        return profile
+
+    def _samples_to_phys(self, x):
+
+        tau_lo, logprior_lo = super()._samples_to_phys(x[: 3 * self.npeaks])
+        tau_hi, logprior_hi = super()._samples_to_phys(x[3 * self.npeaks :])
+
+        tau = jnp.concatenate((tau_lo, tau_hi))
+
+        return tau, logprior_lo + logprior_hi
+
+    def _phys_to_samples(self, tau):
+
+        x_lo = super()._phys_to_samples(tau[: 3 * self.npeaks])
+        x_hi = super()._phys_to_samples(tau[3 * self.npeaks :])
+
+        x = jnp.concatenate((x_lo, x_hi))
+
+        return x
+
+
 class LatentVariableSampler(object):
 
-    def __init__(self, weights, npeaks, maxwraps=2):
+    def __init__(self, weights, npeaks, log10E=None, maxwraps=2):
 
         self.w = weights
         self.maxwraps = maxwraps
         self.npeaks = npeaks
+
+        if log10E is not None:
+            self.log10E = log10E
+            self.log10E_frac = (self.log10E - self.log10E.min()) / (
+                self.log10E.max() - self.log10E.min()
+            )
+
         return
+
+    def Einterp_tau(self, tau):
+
+        tau_lo = tau[: 3 * self.npeaks]
+        tau_hi = tau[3 * self.npeaks :]
+
+        tau_E = tau_lo[None, :] + self.log10E_frac[:, None] * (tau_hi - tau_lo)[None, :]
+
+        return tau_E
 
     def prior_z_given_tau(self, tau):
 
-        A = tau[: self.npeaks]
+        if len(tau) // 3 == 2 * self.npeaks:
+            tau_E = self.Einterp_tau(tau)
+            A = tau_E[:, : self.npeaks]
+        else:
+            A = tau[: self.npeaks][None, :]
 
         # Prior probability that each photon came from each peak
-        A_ik = self.w[:, None] * A[None, :]
+        A_ik = self.w[:, None] * A
 
         # Prior probability that each photon came from the pulsar's unpulsed component
-        U_i = self.w * (1 - np.sum(A))
+        U_i = self.w * (1 - np.sum(A, axis=1))
 
         # Prior probability that the photon came from the background
         B_i = 1 - self.w
@@ -381,31 +515,37 @@ class LatentVariableSampler(object):
 
     def likelihood_z_given_theta_tau(self, tau, phases):
 
-        A = tau[: self.npeaks]
-        mu = tau[self.npeaks : self.npeaks * 2]
-        sigma = tau[self.npeaks * 2 :]
+        if len(tau) // 3 == 2 * self.npeaks:
+            tau_E = self.Einterp_tau(tau)
+            A = tau_E[:, : self.npeaks]
+            mu = tau_E[:, self.npeaks : 2 * self.npeaks]
+            sigma = tau_E[:, 2 * self.npeaks : 3 * self.npeaks]
+        else:
+            A = tau[: self.npeaks][None, :]
+            mu = tau[self.npeaks : self.npeaks * 2][None, :]
+            sigma = tau[self.npeaks * 2 :][None, :]
 
         # Use wrapped Gaussian function to work out photon--component probabilities
         # Wraps for individual photons will be randomly assigned in a later stage
         wraps = np.arange(-self.maxwraps, self.maxwraps + 1, 1)
 
         log_like = (
-            -np.log(sigma)[None, :, None]
+            -np.log(sigma)[:, :, None]
             - 0.5 * np.log(2 * np.pi)
             - 0.5
             * (
-                (phases[:, None, None] - mu[None, :, None] - wraps[None, None, :])
-                / sigma[None, :, None]
+                (phases[:, None, None] - mu[:, :, None] - wraps[None, None, :])
+                / sigma[:, :, None]
             )
             ** 2
         )
 
-        return log_like
+        return log_like, mu, sigma
 
     def post_z_given_theta_tau(self, tau, phases):
 
         A_ik, U_i, B_i = self.prior_z_given_tau(tau)
-        log_like = self.likelihood_z_given_theta_tau(tau, phases)
+        log_like, mu, sigma = self.likelihood_z_given_theta_tau(tau, phases)
 
         # Mixture weights
         log_rho_ik = np.log(A_ik)[:, :, None] + log_like
@@ -420,18 +560,22 @@ class LatentVariableSampler(object):
 
         rho = np.concatenate((rho_ik, rho_iU[:, None], rho_iB[:, None]), axis=1)
 
-        return A_ik, U_i, B_i, log_like, rho
+        return A_ik, U_i, B_i, log_like, rho, mu, sigma
 
     def sample_z_given_theta_tau(self, tau, phases):
 
-        A_ik, U_i, B_i, log_like, rho = self.post_z_given_theta_tau(tau, phases)
+        A_ik, U_i, B_i, log_like, rho, mu, sigma = self.post_z_given_theta_tau(
+            tau, phases
+        )
 
         C = np.cumsum(rho, axis=1)
         u = np.random.rand(len(phases))
         z = np.sum(C < u[:, None], axis=1)
-        m = np.zeros(len(phases))
+        m = np.zeros(len(phases), dtype=int)
         wraps = np.arange(-1, 2, 1)
 
+        mu_z = np.zeros(len(phases))
+        sigma_z = np.zeros(len(phases))
         for k in range(self.npeaks):
             mask = np.where(z == k)[0]
 
@@ -445,4 +589,12 @@ class LatentVariableSampler(object):
             u = np.random.rand(len(mask))
             m[mask] = np.sum(C_wraps < u[:, None], axis=1)
 
-        return z, m
+            # Check for energy dependence
+            if np.shape(mu)[0] == 1:
+                mu_z[mask] = mu[0, k] + wraps[m[mask]]
+                sigma_z[mask] = sigma[0, k]
+            else:
+                mu_z[mask] = mu[mask, k] + wraps[m[mask]]
+                sigma_z[mask] = sigma[mask, k]
+
+        return mu_z, sigma_z

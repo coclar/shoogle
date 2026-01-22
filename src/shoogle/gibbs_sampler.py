@@ -27,7 +27,12 @@ pint.logging.setup(level="WARNING")
 from shoogle.plot_gibbs_results import GibbsResults, fermi_lc
 from shoogle.utils import *
 from shoogle.noise_models import BrokenPowerLaw, FlatTailBrokenPowerLaw
-from shoogle.conditional_samplers import TemplateSampler, LatentVariableSampler
+from shoogle.conditional_samplers import (
+    TemplateSampler,
+    LatentVariableSampler,
+    EdepTemplateSampler,
+)
+
 
 def read_input_ft1_file(infile, FT2, weightfield, wmin, ephem_str):
 
@@ -45,9 +50,10 @@ def read_input_ft1_file(infile, FT2, weightfield, wmin, ephem_str):
         ephem=ephem_str,
     )
 
-    weights = np.array([float(w["weight"]) for w in toas.table["flags"]])
+    weights = np.array([float(t["weight"]) for t in toas.table["flags"]])
+    energies = np.array([float(t["energy"]) for t in toas.table["flags"]])
 
-    return toas, weights
+    return toas, weights, energies
 
 
 class Gibbs(object):
@@ -64,6 +70,7 @@ class Gibbs(object):
         templatefile=None,
         wmin=0.05,
         timfile=None,
+        Edep=False,
     ):
         """
 
@@ -93,8 +100,13 @@ class Gibbs(object):
                        Minimum photon weight to include.
                        Typically this should be around 0.01--0.05.
                        Higher values speed up processing but decrease sensivity.
-        timfile     :  str, optional
+        timfile      : str, optional
                        .tim file containing radio ToAs
+        Edep         : bool, default=False
+                       Fit for energy-dependence in the gamma-ray pulse profile
+                       Template peak parameters (amp, position, width) will be
+                       linearly interpolated as a function of log10(E)
+
         """
 
         self.parfile = parfile
@@ -102,10 +114,12 @@ class Gibbs(object):
 
         print("Loading FT1 file")
 
-        self.photon_toas, self.w = read_input_ft1_file(
+        self.photon_toas, self.w, energies = read_input_ft1_file(
             ft1file, ft2file, weightfield, wmin, self.timing_model.EPHEM.value
         )
         self.t = self.photon_toas.get_mjds().value
+
+        self.log10E = np.log10(energies)
 
         self.nphot = len(self.t)
 
@@ -143,10 +157,20 @@ class Gibbs(object):
                 if l.split()[0] == "LATPHASE":
                     extra_phase = float(l.split()[1])
 
-        self.tau_sampler = TemplateSampler(templatefile,self.w)
+        self.Edep = Edep
+        if self.Edep:
+            self.tau_sampler = EdepTemplateSampler(templatefile, self.w, self.log10E)
+        else:
+            self.tau_sampler = TemplateSampler(templatefile, self.w)
+
         self.npeaks = self.tau_sampler.npeaks
 
-        self.zm_sampler = LatentVariableSampler(self.w, self.npeaks)
+        if self.Edep:
+            self.zm_sampler = LatentVariableSampler(
+                self.w, self.npeaks, log10E=self.log10E
+            )
+        else:
+            self.zm_sampler = LatentVariableSampler(self.w, self.npeaks)
 
         print("Constructing design matrix")
         self._make_design_matrix()
@@ -436,7 +460,7 @@ class Gibbs(object):
 
         return new_hyp
 
-    def _sample_theta_given_lambda_z_tau(self, z):
+    def _sample_theta_given_lambda_z_tau(self):
 
         p = mvn.rvs(mean=np.zeros_like(self.theta_opt))
         theta = self.theta_opt + solve(self.post_cov_inv_U, p)
@@ -451,10 +475,7 @@ class Gibbs(object):
 
         return theta, phase_shifts
 
-    def _setup_leastsq_given_z_tau(self, z, m, tau):
-
-        mu = tau[self.npeaks:self.npeaks * 2]
-        sigma = tau[self.npeaks * 2:]
+    def _setup_leastsq_given_z_tau(self, mu_z, sigma_z):
 
         npar = self.n_timing_pars
 
@@ -462,28 +483,17 @@ class Gibbs(object):
             npar += self.nOPVfreqs * 2
 
         # Setting up WLS with photons assigned to peaks
-        pulsed_photons = np.where(z < self.npeaks)[0]
+        pulsed_photons = np.where(sigma_z > 0)[0]
         M = np.copy(self.M[pulsed_photons])
-        resids = np.asarray(self.phi[pulsed_photons], dtype=float)
-        precisions = np.zeros_like(resids)
-        wraps = np.copy(m[pulsed_photons])
-
-        # plt.ioff()
-        # plt.title('Prefit')
-        for k in range(self.npeaks):
-            peak_photons = np.where(z[pulsed_photons] == k)[0]
-            resids[peak_photons] -= wraps[peak_photons] + mu[k]
-            precisions[peak_photons] = 1.0/sigma[k] ** 2
-
-        #     plt.errorbar(self.t[pulsed_photons][peak_photons],resids[peak_photons],yerr=1.0/np.sqrt(precisions[peak_photons]),color=f'C{k}',ls='none')
-        # plt.show()
+        resids = np.asarray(
+            self.phi[pulsed_photons] - mu_z[pulsed_photons], dtype=float
+        )
+        precisions = 1.0 / sigma_z[pulsed_photons] ** 2
 
         if hasattr(self, "radio_toas"):
             resids = np.append(resids, self.radio_resids)
             precisions = np.append(precisions, self.radio_toa_uncerts**-2)
             M = np.append(M, self.Mradio, axis=0)
-        #     plt.errorbar(self.radio_t,self.radio_resids,yerr=self.radio_toa_uncerts,ls='none',color='black')
-        # plt.show()
 
         MT_Sigma_inv = np.einsum("ij,j->ij", M.T, precisions, optimize="greedy")
         self.resids = resids
@@ -496,7 +506,13 @@ class Gibbs(object):
     def _Htest_logL(self, tau, phase_shifts):
 
         phi = np.mod(self.phi - phase_shifts, 1.0)
-        logL = np.sum(np.log((1 - self.w) + self.w * self.tau_sampler.template(tau,phi)))
+
+        if self.Edep:
+            profile = self.tau_sampler.template(tau, phi, self.log10E)
+        else:
+            profile = self.tau_sampler.template(tau, phi)
+
+        logL = np.sum(np.log((1 - self.w) + self.w * profile))
 
         return hmw(phi, self.w), logL
 
@@ -868,9 +884,6 @@ class Gibbs(object):
 
         """
 
-        ntau = 0
-        tau = 10000
-
         # template alignment check
         fig, ax = plt.subplots(2, 1, sharex=True, height_ratios=[1, 2], figsize=(5, 10))
         i = np.argsort(self.w)
@@ -881,7 +894,14 @@ class Gibbs(object):
         fermi_lc(np.mod(self.phi, 1.0), self.w, ax=ax[0], xbins=100)
         S = np.sum(self.w**2) / 100
         B = np.sum(self.w * (1 - self.w)) / 100
-        template = self.tau_sampler.template(self.tau_sampler.tau_0, p)
+        if self.Edep:
+            template = self.tau_sampler.template(
+                self.tau_sampler.tau_0,
+                p,
+                np.ones_like(p) * np.average(self.log10E, weights=self.w),
+            )
+        else:
+            template = self.tau_sampler.template(self.tau_sampler.tau_0, p)
         ax[0].plot(p, B + S * template, color="orange")
         ax[0].set_xlim(0.0, 1.0)
         ax[0].set_ylim(0.0, B + S * template.max() * 1.05)
@@ -945,7 +965,7 @@ class Gibbs(object):
                     hyp = np.append(hyp, component.x0)
                 self._make_psd_cov(hyp)
 
-            self.template_chain = np.zeros((update, self.npeaks * 3))
+            self.template_chain = np.zeros((update, len(self.tau_sampler.tau_0)))
             self.loglike_chain = np.zeros(update)
             phase_shifts = np.zeros(self.nphot)
 
@@ -956,8 +976,10 @@ class Gibbs(object):
 
             if self.nhyp > 0:
                 if not hasattr(self, "lambda_emcee_cov"):
-                    z,m = self.zm_sampler.sample_z_given_theta_tau(tau, self.phi - phase_shifts)
-                    self._setup_leastsq_given_z_tau(z,m,tau)
+                    mu_z, sigma_z = self.zm_sampler.sample_z_given_theta_tau(
+                        tau, self.phi - phase_shifts
+                    )
+                    self._setup_leastsq_given_z_tau(mu_z, sigma_z)
                     self._tune_lambda_sampler(hyp, progress=True)
 
             c = 0
@@ -982,7 +1004,9 @@ class Gibbs(object):
                 )
 
                 self.template_chain = np.append(
-                    self.template_chain, np.zeros((update, self.npeaks * 3)), axis=0
+                    self.template_chain,
+                    np.zeros((update, len(self.tau_sampler.tau_0))),
+                    axis=0,
                 )
 
                 if self.has_OPV:
@@ -997,11 +1021,15 @@ class Gibbs(object):
                     )
 
             # 1) Update template pulse profile
-            tau = self.tau_sampler.draw_one_template(tau, self.phi - phase_shifts)
+            tau = self.tau_sampler.sample_tau_given_theta(
+                tau, self.phi - phase_shifts, num_steps=5
+            )
 
             # 2) Assign photons to components given previous timing model and template pulse prof.
-            z, m = self.zm_sampler.sample_z_given_theta_tau(tau, self.phi - phase_shifts)
-            self._setup_leastsq_given_z_tau(z,m,tau)
+            mu_z, sigma_z = self.zm_sampler.sample_z_given_theta_tau(
+                tau, self.phi - phase_shifts
+            )
+            self._setup_leastsq_given_z_tau(mu_z, sigma_z)
 
             # 3) Sample hyperparameters using Metropolis-Hastings on p(lambda | X, tau, z)
             #    (This is marginalised over the timing model)
@@ -1022,10 +1050,10 @@ class Gibbs(object):
                 )
 
             # 4) Sample timing model from p(theta | X, tau, z, lambda)
-            (theta, phase_shifts) = self._sample_theta_given_lambda_z_tau(z)
+            (theta, phase_shifts) = self._sample_theta_given_lambda_z_tau()
 
             chi2 = np.sum((theta - self.theta_prior) ** 2 * self.inv_prior_cov)
-            Htest, logL = self._Htest_logL(tau,phase_shifts)
+            Htest, logL = self._Htest_logL(tau, phase_shifts)
             logpost = logL - 0.5 * chi2 - 0.5 * self.logdet_prior
 
             if plots:
@@ -1127,7 +1155,7 @@ class Gibbs(object):
                     )
                     sys.stdout.flush()
                 else:
-                    progress.reset(total = acor_time * n_acor_target)
+                    progress.reset(total=acor_time * n_acor_target)
                     progress.start_t = start_time
                     progress.last_print_t = start_time
                     progress.update(c)
