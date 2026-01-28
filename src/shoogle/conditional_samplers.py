@@ -1,5 +1,6 @@
 import numpy as np
 import jax
+from jax.scipy.linalg import cholesky, cho_solve, solve
 import jax.numpy as jnp
 import blackjax
 from scipy.special import logit, expit
@@ -46,7 +47,7 @@ class TemplateSampler(object):
         self.mu_0 = np.array([p.get_location() for p in prims])
         self.sigma_0 = np.array([p.get_width() for p in prims])
 
-        self.tau_0 = np.concatenate((self.A_0, self.mu_0, self.sigma_0))
+        self.tau_0 = jnp.array(np.concatenate((self.A_0, self.mu_0, self.sigma_0)))
         self.npeaks = len(prims)
 
         self.maxwraps = maxwraps
@@ -230,22 +231,22 @@ class TemplateSampler(object):
         mu = tau[self.npeaks : self.npeaks * 2]
         sigma = tau[self.npeaks * 2 :]
 
-        Bk = np.copy(A)
+        Bk = A.copy()
 
         # Transform to beta-distributed variables with (0,1)
         # which ensures a Dirichlet prior on amplitudes + unpulsed comp.
         U = 1 - Bk[0]
         for p in range(1, self.npeaks):
-            Bk[p] = A[p] / U
+            Bk = Bk.at[p].set(A[p] / U)
             U -= A[p]
 
         # Uniform prior on log(sigma), transformed to (0,1)
-        logsigma01 = (np.log(sigma) - self.minlogsigma) / (
+        logsigma01 = (jnp.log(sigma) - self.minlogsigma) / (
             self.maxlogsigma - self.minlogsigma
         )
 
         # then logit transformed -> (-inf,inf)
-        x = jnp.array(np.concatenate((logit(Bk), logit(mu), logit(logsigma01))))
+        x = jax.scipy.special.logit(jnp.concatenate((Bk, mu, logsigma01)))
 
         return x
 
@@ -295,14 +296,14 @@ class TemplateSampler(object):
                 **self.nuts_params,
             )
 
-            return state
+            return state, (self._samples_to_phys(state.position)[0], state.logdensity)
 
         self.kernel = kernel
         tau, logprior = self._samples_to_phys(state.position)
 
-        return np.array(tau)
+        return np.array(tau), sample_key
 
-    def sample(self, tau, phases, num_samples=1000):
+    def sample(self, tau, phases, key, num_samples=1000):
         """
         Run the blackjax NUTS sampler to estimate parameters of the template
 
@@ -332,57 +333,17 @@ class TemplateSampler(object):
         logprob_fn = lambda x: self.logprob_fn(x, phases)
         state = blackjax.nuts.init(x0, logprob_fn)
 
-        samples = np.zeros((num_samples, len(self.tau_0)))
-        logL = np.zeros(num_samples)
+        one_step = lambda state, key: self.kernel(key, state, phases)
+        tau_keys = jax.random.split(key, num_samples + 1)
 
-        for step in tqdm(range(num_samples)):
-            self.sample_key, key = jax.random.split(self.sample_key)
-            state = self.kernel(key, state, phases)
-            samples[step], _ = self._samples_to_phys(state.position)
-            logL[step] = state.logdensity
+        _, samples = jax.lax.scan(one_step, state, tau_keys[:-1])
 
-        return samples, logL
+        return samples, tau_keys[-1]
 
-    def sample_tau_given_theta(self, tau, phases, num_steps=10):
-        """
-        Draw a single set of template parameters, given the current photon phases.
-        This is intended to be used to draw single samples from the conditional
-        distribution for Gibbs sampling
+    def sample_tau_given_theta(self, tau, phases, key, num_steps=10):
 
-
-        Parameters
-        ----------
-
-        tau       :   np.ndarray of dtype float
-                      Template pulse profile parameters
-
-        phases    :   np.ndarray of dtype float
-                      Photon phases
-
-        num_samples : Number of steps to run the chain for, default = 10
-
-        Returns
-        ----------
-        tau   :       np.ndarray of dtype float32
-                      A single set of template pulse profile parameters
-        """
-
-        phases = jnp.array(phases)
-        logprob_fn = lambda x: self.logprob_fn(x, phases)
-
-        x = self._phys_to_samples(tau)
-        state = blackjax.nuts.init(x, logprob_fn)
-
-        samples = np.zeros((num_steps, len(self.tau_0)))
-        logL = np.zeros(num_steps)
-
-        for step in range(num_steps):
-            self.sample_key, key = jax.random.split(self.sample_key)
-            state = self.kernel(key, state, phases)
-
-        tau, logprior = self._samples_to_phys(state.position)
-
-        return np.array(tau)
+        samples, key = self.sample(tau, phases, key, num_steps)
+        return samples[0][-1], key
 
 
 class EdepTemplateSampler(TemplateSampler):
@@ -471,6 +432,9 @@ class LatentVariableSampler(object):
         self.w = weights
         self.maxwraps = maxwraps
         self.npeaks = npeaks
+        self.wraps = jnp.arange(-self.maxwraps, self.maxwraps + 1, 1)
+
+        self.key = jax.random.key(0)
 
         if log10E is not None:
             self.log10E = log10E
@@ -501,15 +465,12 @@ class LatentVariableSampler(object):
         A_ik = self.w[:, None] * A
 
         # Prior probability that each photon came from the pulsar's unpulsed component
-        U_i = self.w * (1 - np.sum(A, axis=1))
+        U_i = self.w * (1 - jnp.sum(A, axis=1))
 
         # Prior probability that the photon came from the background
         B_i = 1 - self.w
 
-        norm = np.sum(A_ik, axis=1) + U_i + B_i  # should be unity
-        assert np.allclose(
-            norm, 1.0
-        ), f"Norms don't all add up to one. (Max = {np.max(norm)},min = {np.min(norm)})."
+        norm = jnp.sum(A_ik, axis=1) + U_i + B_i  # should be unity
 
         return A_ik, U_i, B_i
 
@@ -527,14 +488,13 @@ class LatentVariableSampler(object):
 
         # Use wrapped Gaussian function to work out photon--component probabilities
         # Wraps for individual photons will be randomly assigned in a later stage
-        wraps = np.arange(-self.maxwraps, self.maxwraps + 1, 1)
 
         log_like = (
-            -np.log(sigma)[:, :, None]
-            - 0.5 * np.log(2 * np.pi)
+            -jnp.log(sigma)[:, :, None]
+            - 0.5 * jnp.log(2 * np.pi)
             - 0.5
             * (
-                (phases[:, None, None] - mu[:, :, None] - wraps[None, None, :])
+                (phases[:, None, None] - mu[:, :, None] - self.wraps[None, None, :])
                 / sigma[:, :, None]
             )
             ** 2
@@ -548,53 +508,97 @@ class LatentVariableSampler(object):
         log_like, mu, sigma = self.likelihood_z_given_theta_tau(tau, phases)
 
         # Mixture weights
-        log_rho_ik = np.log(A_ik)[:, :, None] + log_like
+        # Axes are (photons, peaks, wraps)
+        log_rho_ik = jnp.log(A_ik)[:, :, None] + log_like
 
         # This sums over phase wraps for each component
-        rho_ik = np.sum(np.exp(log_rho_ik), axis=-1)
+        rho_ik = jnp.sum(jnp.exp(log_rho_ik), axis=-1)
 
-        sum_rho = np.sum(rho_ik, axis=1) + U_i + B_i
+        sum_rho = jnp.sum(rho_ik, axis=1) + U_i + B_i
         rho_ik = rho_ik / sum_rho[:, None]
         rho_iU = U_i / sum_rho
         rho_iB = B_i / sum_rho
 
-        rho = np.concatenate((rho_ik, rho_iU[:, None], rho_iB[:, None]), axis=1)
+        rho = jnp.concatenate((rho_ik, rho_iU[:, None], rho_iB[:, None]), axis=1)
 
         return A_ik, U_i, B_i, log_like, rho, mu, sigma
 
-    def sample_z_given_theta_tau(self, tau, phases):
+    def sample_z_given_theta_tau(self, tau, phases, key):
 
         A_ik, U_i, B_i, log_like, rho, mu, sigma = self.post_z_given_theta_tau(
             tau, phases
         )
 
-        C = np.cumsum(rho, axis=1)
-        u = np.random.rand(len(phases))
-        z = np.sum(C < u[:, None], axis=1)
-        m = np.zeros(len(phases), dtype=int)
-        wraps = np.arange(-1, 2, 1)
+        C = jnp.cumsum(rho, axis=1)
 
-        mu_z = np.zeros(len(phases))
-        sigma_z = np.zeros(len(phases))
+        z_key, m_key, next_key = jax.random.split(key, 3)
+
+        zr = jax.random.uniform(z_key, (len(phases),))
+        mr = jax.random.uniform(m_key, (len(phases),))
+
+        z = jnp.sum(C < zr[:, None], axis=1)
+
+        mu_z = jnp.zeros(len(phases))
+        sigma_z = jnp.zeros(len(phases))
         for k in range(self.npeaks):
-            mask = np.where(z == k)[0]
+            mask = z == k
 
-            log_rho_wraps = log_like[mask, k]
+            log_rho_wraps = log_like[:, k]
 
-            rho_wraps = np.exp(log_rho_wraps)
-            rho_wraps /= np.sum(rho_wraps, axis=1)[:, None]
+            rho_wraps = jnp.exp(log_rho_wraps)
+            rho_wraps /= jnp.sum(rho_wraps, axis=1)[:, None]
 
-            C_wraps = np.cumsum(rho_wraps, axis=1)
+            C_wraps = jnp.cumsum(rho_wraps, axis=1)
 
-            u = np.random.rand(len(mask))
-            m[mask] = np.sum(C_wraps < u[:, None], axis=1)
+            m = jnp.sum(C_wraps < mr[:, None], axis=1)
 
-            # Check for energy dependence
-            if np.shape(mu)[0] == 1:
-                mu_z[mask] = mu[0, k] + wraps[m[mask]]
-                sigma_z[mask] = sigma[0, k]
-            else:
-                mu_z[mask] = mu[mask, k] + wraps[m[mask]]
-                sigma_z[mask] = sigma[mask, k]
+            mu_z = jnp.where(mask, mu[0, k] + self.wraps[m], mu_z)
+            sigma_z = jnp.where(mask, sigma[0, k], sigma_z)
 
-        return mu_z, sigma_z
+        return mu_z, sigma_z, next_key
+
+
+class TimingModelSampler(object):
+
+    def __init__(self, phi, M, theta_prior):
+
+        self.phi = phi
+        self.npar = np.shape(M)[1]
+        self.M = jnp.array(M)
+        self.theta_prior = jnp.array(theta_prior)
+
+    def setup_leastsq_given_z_tau(self, mu_z, sigma_z):
+
+        resids = self.phi - mu_z
+        precisions = jnp.where(sigma_z > 0, 1.0 / sigma_z**2, 0.0)
+
+        MT_Sigma_inv_M = jnp.einsum("ji,j,jk->ik", self.M, precisions, self.M)
+        MT_Sigma_inv_R = jnp.einsum("ji,j,j->i", self.M, precisions, resids)
+
+        return MT_Sigma_inv_M, MT_Sigma_inv_R
+
+    def solve_leastsq(self, MT_Sigma_inv_M, MT_Sigma_inv_R, inv_prior_cov):
+
+        post_cov_inv = MT_Sigma_inv_M + inv_prior_cov
+        post_cov_inv_U = cholesky(post_cov_inv, lower=False)
+
+        theta_opt = cho_solve(
+            (post_cov_inv_U, False), MT_Sigma_inv_R + inv_prior_cov @ self.theta_prior
+        )
+
+        return theta_opt, post_cov_inv_U
+
+    def sample_theta_given_lambda_z_m_tau(self, mu_z, sigma_z, inv_prior_cov, key):
+
+        MT_Sigma_inv_M, MT_Sigma_inv_R = self.setup_leastsq_given_z_tau(mu_z, sigma_z)
+        theta_opt, post_cov_inv_U = self.solve_leastsq(
+            MT_Sigma_inv_M, MT_Sigma_inv_R, inv_prior_cov
+        )
+
+        theta_key, key = jax.random.split(key)
+        p = jax.random.normal(theta_key, (len(MT_Sigma_inv_R),))
+        theta = theta_opt + solve(post_cov_inv_U, p)
+        phase_shifts = self.M @ theta
+        phase_shifts -= jnp.mean(phase_shifts)
+
+        return theta, phase_shifts, key
