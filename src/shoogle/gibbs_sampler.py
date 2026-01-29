@@ -231,7 +231,9 @@ class Gibbs(object):
                                 self.WXfreqs,
                                 self.WXSinds,
                                 self.WXCinds,
-                                [A_free, FC_free, GAM_free, KAPPA_free],
+                                np.array(
+                                    [A_free, FC_free, GAM_free, KAPPA_free], dtype=bool
+                                ),
                                 self.Tobs,
                                 np.array([logA0, logFC0, GAM0, KAPPA0]),
                                 prefix,
@@ -244,12 +246,14 @@ class Gibbs(object):
                                 self.WXfreqs,
                                 self.WXSinds,
                                 self.WXCinds,
-                                [A_free, FC_free, GAM_free],
+                                np.array([A_free, FC_free, GAM_free], dtype=bool),
                                 self.Tobs,
                                 np.array([logA0, logFC0, GAM0]),
                                 prefix,
                             )
                         )
+                    if A_free == 2:
+                        self.noise_models[-1].linear_amp_prior = True
                     nc += 1
                 else:
                     break
