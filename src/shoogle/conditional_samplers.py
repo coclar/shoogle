@@ -669,6 +669,8 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
         scales = np.ones(len(noise_models))
 
+        free_par_indices = np.array([], dtype="int")
+
         for c in range(len(self.noise_models)):
 
             freqs[c, self.noise_models[c].Cinds] = self.noise_models[c].freqs.to_value(
@@ -686,10 +688,10 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
             num_pars = len(self.noise_models[c].free)
             hyp0[c, :num_pars] = self.noise_models[c].x0
-
             free[c, :num_pars] = self.noise_models[c].free
             bounds[c, :num_pars, :] = self.noise_models[c].bounds
 
+        self.free_par_indices = np.where(free)
         self.noise_freqs = jnp.array(freqs)
 
         nfree = np.sum(free)
@@ -707,7 +709,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         self.hyp_bounds = jnp.array(hyp_bounds)
         self.hyp_free = jnp.array(free)
         self.scales = jnp.array(scales)
-        self.x0 = jnp.array(hyp0)
+        self.fixed_hyp = jnp.array(hyp0)
         self.min_freqs = jnp.array(min_freqs)
         self.linear_priors = jnp.array(linear_priors)
 
@@ -736,18 +738,8 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         return hyp, logprior + amp_prior
 
     def _fill_noise_pars(self, hyp):
-        p = 0
-        all_hyp = []
 
-        for c in range(len(self.noise_models)):
-            pars = []
-            for i in range(len(self.hyp_free[c])):
-                use_hyp = self.hyp_free[c][i]
-                param = jax.lax.cond(use_hyp, lambda: hyp[p], lambda: self.x0[c][i])
-                pars.append(param)
-                p += jax.lax.cond(use_hyp, lambda: 1, lambda: 0)
-
-            all_hyp.append(pars)
+        all_hyp = self.fixed_hyp.at[self.free_par_indices].set(hyp)
 
         return all_hyp
 
