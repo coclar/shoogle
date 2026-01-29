@@ -6,8 +6,11 @@ import blackjax
 from scipy.special import logit, expit
 from pint.templates.lctemplate import LCTemplate, prim_io
 from tqdm.auto import tqdm
+from astropy import units as u
 
 ONE_OVER_SQRT2PI = 1.0 / (jnp.sqrt(2 * jnp.pi))
+YR3_TO_S2D = (1.0 * u.yr**3).to_value("s ** 2 * d")
+INVYR_TO_INVDAY = (1.0 / u.yr).to_value("1/d")
 
 
 class TemplateSampler(object):
@@ -552,8 +555,12 @@ class LatentVariableSampler(object):
 
             m = jnp.sum(C_wraps < mr[:, None], axis=1)
 
-            mu_z = jnp.where(mask, mu[0, k] + self.wraps[m], mu_z)
-            sigma_z = jnp.where(mask, sigma[0, k], sigma_z)
+            if len(tau) // 3 == 2 * self.npeaks:
+                mu_z = jnp.where(mask, mu[:, k] + self.wraps[m], mu_z)
+                sigma_z = jnp.where(mask, sigma[:, k], sigma_z)
+            else:
+                mu_z = jnp.where(mask, mu[0, k] + self.wraps[m], mu_z)
+                sigma_z = jnp.where(mask, sigma[0, k], sigma_z)
 
         return mu_z, sigma_z, next_key
 
@@ -579,7 +586,7 @@ class TimingModelSampler(object):
 
     def solve_leastsq(self, MT_Sigma_inv_M, MT_Sigma_inv_R, inv_prior_cov):
 
-        post_cov_inv = MT_Sigma_inv_M + inv_prior_cov
+        post_cov_inv = jnp.asarray(MT_Sigma_inv_M + inv_prior_cov, dtype=jnp.float64)
         post_cov_inv_U = cholesky(post_cov_inv, lower=False)
 
         theta_opt = cho_solve(
@@ -602,3 +609,294 @@ class TimingModelSampler(object):
         phase_shifts -= jnp.mean(phase_shifts)
 
         return theta, phase_shifts, key
+
+
+def bpl_powspec(pars, freqs):
+
+    logA = pars[0]
+    logfc = pars[1]
+    gamma = pars[2]
+
+    A = 10**logA
+    fc = 10**logfc
+
+    # In units of yr ** 3
+    norm = A**2 / (12 * jnp.pi**2) * (fc ** (-gamma))
+
+    psd = norm * (1 + (freqs / fc) ** 2) ** (-gamma / 2)
+
+    return psd * YR3_TO_S2D
+
+
+def bpl_flattail_powspec(pars, freqs):
+
+    bpl = self.bpl_powspec(pars, freqs)
+    logkappa = pars[3]
+
+    flat = 10 ** (2 * logkappa) * YR3_TO_S2D
+    psd = jnp.maximum(bpl, flat)
+
+    return psd
+
+
+class NoiseAndTimingModelSampler(TimingModelSampler):
+
+    def __init__(
+        self,
+        phi,
+        M,
+        theta_prior,
+        timing_prior_uncertainties,
+        noise_models,
+        parameter_scales,
+        PB0=None,
+    ):
+
+        self.phi = phi
+        self.npar = np.shape(M)[1]
+        self.M = jnp.array(M)
+        self.theta_prior = jnp.array(theta_prior)
+        self.parameter_scales = parameter_scales
+
+        self.K0 = jnp.array(timing_prior_uncertainties**2)
+        self.noise_models = noise_models
+
+        freqs = np.zeros((len(noise_models), len(parameter_scales)))
+        free = np.zeros((len(noise_models), 4), dtype=bool)
+        bounds = np.zeros((len(noise_models), 4, 2))
+        hyp0 = np.zeros((len(noise_models), 4))
+        min_freqs = np.zeros((len(noise_models)))
+
+        scales = np.ones(len(noise_models))
+
+        for c in range(len(self.noise_models)):
+
+            freqs[c, self.noise_models[c].Cinds] = self.noise_models[c].freqs.to_value(
+                "1/yr"
+            )
+            freqs[c, self.noise_models[c].Sinds] = self.noise_models[c].freqs.to_value(
+                "1/yr"
+            )
+
+            min_freqs[c] = self.noise_models[c].freqs.to_value("1/yr").min()
+
+            if "OPV" in self.noise_models[c].prefix:
+                scales[c] = 1.0 / PB0.to_value("s") ** 2
+                print(scales)
+
+            num_pars = len(self.noise_models[c].free)
+            hyp0[c, :num_pars] = self.noise_models[c].x0
+
+            free[c, :num_pars] = self.noise_models[c].free
+            bounds[c, :num_pars, :] = self.noise_models[c].bounds
+
+        self.noise_freqs = jnp.array(freqs)
+
+        nfree = np.sum(free)
+        hyp_bounds = np.zeros((nfree, 2))
+        linear_priors = np.zeros(nfree)
+        p = 0
+        for c in range(len(self.noise_models)):
+            hyp_bounds[p : p + np.sum(free[c]), :] = bounds[c, free[c], :]
+
+            if free[c][0] and self.noise_models[c].linear_amp_prior:
+                linear_priors[p] = True
+
+            p += np.sum(free[c])
+
+        self.hyp_bounds = jnp.array(hyp_bounds)
+        self.hyp_free = jnp.array(free)
+        self.scales = jnp.array(scales)
+        self.x0 = jnp.array(hyp0)
+        self.min_freqs = jnp.array(min_freqs)
+        self.linear_priors = jnp.array(linear_priors)
+
+    def _phys_to_samples(self, hyp):
+
+        cube_pars = (hyp - self.hyp_bounds[:, 0]) / (
+            self.hyp_bounds[:, 1] - self.hyp_bounds[:, 0]
+        )
+        return jax.scipy.special.logit(cube_pars)
+
+    def _samples_to_phys(self, x):
+
+        cube_pars = jax.scipy.special.expit(x)
+        logprior = jnp.sum(jnp.log(cube_pars * (1 - cube_pars)))
+
+        hyp = self.hyp_bounds[:, 0] + cube_pars * (
+            self.hyp_bounds[:, 1] - self.hyp_bounds[:, 0]
+        )
+
+        amp_prior = 0.0
+        for c in range(len(x)):
+            amp_prior += jax.lax.cond(
+                self.linear_priors[c], lambda: hyp[c], lambda: 0.0
+            )
+
+        return hyp, logprior + amp_prior
+
+    def _fill_noise_pars(self, hyp):
+        p = 0
+        all_hyp = []
+
+        for c in range(len(self.noise_models)):
+            pars = []
+            for i in range(len(self.hyp_free[c])):
+                use_hyp = self.hyp_free[c][i]
+                param = jax.lax.cond(use_hyp, lambda: hyp[p], lambda: self.x0[c][i])
+                pars.append(param)
+                p += jax.lax.cond(use_hyp, lambda: 1, lambda: 0)
+
+            all_hyp.append(pars)
+
+        return all_hyp
+
+    def _make_psd_cov(self, all_hyp):
+
+        K = self.K0.copy()
+
+        for c in range(len(self.noise_models)):
+
+            powspec = (
+                jnp.where(
+                    self.noise_freqs[c] > 0,
+                    (
+                        bpl_powspec(all_hyp[c], self.noise_freqs[c])
+                        * self.min_freqs[c]
+                        * INVYR_TO_INVDAY
+                    ),
+                    0.0,
+                )
+                * self.scales[c]
+            )
+
+            K += powspec
+
+        Kinv = jnp.where(K > 0, 1.0 / K, 0.0)
+        Kinv /= self.parameter_scales**2
+
+        logdet_prior = -jnp.sum(jnp.where(Kinv > 0, jnp.log(Kinv), 0.0))
+
+        return jnp.diag(Kinv), logdet_prior
+
+    def log_post(self, x, MT_Sigma_inv_M, MT_Sigma_inv_R):
+
+        hyp, logprior = self._samples_to_phys(x)
+        all_hyp = self._fill_noise_pars(hyp)
+
+        inv_prior_cov, logdet_prior = self._make_psd_cov(all_hyp)
+
+        theta_opt, post_cov_inv_U = self.solve_leastsq(
+            MT_Sigma_inv_M, MT_Sigma_inv_R, inv_prior_cov
+        )
+
+        prior_chi2 = self.theta_prior @ (inv_prior_cov @ self.theta_prior)
+        post_chi2 = jnp.sum((post_cov_inv_U @ theta_opt) ** 2)
+        logdet_post = -2 * jnp.sum(jnp.log(jnp.diag(post_cov_inv_U)))
+        logL = logprior - 0.5 * (logdet_prior + prior_chi2 - logdet_post - post_chi2)
+
+        return logL
+
+    def setup_sampler(self, mu_z, sigma_z):
+        """
+        Performs a warm-up run to tune parameters (step size, covariance matrix)
+        of the blackjax NUTS sampler for efficient sampling later.
+
+        This also generates the
+
+        Parameters
+        ----------
+        phases     : jax.numpy.ndarray of dtype float32
+                     Array of observed photon phases (in [0, 1]).
+        """
+
+        x0 = self._phys_to_samples(self.hyp_0)
+
+        MT_Sigma_inv_M, MT_Sigma_inv_R = self.setup_leastsq_given_z_tau(mu_z, sigma_z)
+
+        logprob_fn = lambda x: self.log_post(x, MT_Sigma_inv_M, MT_Sigma_inv_R)
+
+        warmup = blackjax.window_adaptation(
+            blackjax.nuts, logprob_fn, progress_bar=True
+        )
+
+        rng_key = jax.random.key(0)
+        rng_key, warmup_key, sample_key = jax.random.split(rng_key, 3)
+        (state, parameters), _ = warmup.run(warmup_key, x0, num_steps=1000)
+
+        self.nuts_params = parameters
+        self.sample_key = sample_key
+
+        step_fn = blackjax.nuts.build_kernel()
+
+        @jax.jit
+        def kernel(rng_key, state, MT_Sigma_inv_M, MT_Sigma_inv_R):
+
+            logprob_fn = lambda x: self.log_post(x, MT_Sigma_inv_M, MT_Sigma_inv_R)
+            state, _ = step_fn(
+                rng_key=rng_key,
+                state=state,
+                logdensity_fn=logprob_fn,
+                **self.nuts_params,
+            )
+
+            return state, (self._samples_to_phys(state.position)[0], state.logdensity)
+
+        self.logprob_fn = jax.jit(self.log_post)
+
+        self.kernel = kernel
+        # hyp, logprior = state.position
+
+        return self._samples_to_phys(state.position)[0], sample_key
+
+    def sample(self, hyp, mu_z, sigma_z, key, num_samples=1000):
+        """
+        Run the blackjax NUTS sampler to estimate parameters of the template
+
+        Parameters
+        ----------
+
+        tau       :   np.ndarray of dtype float
+                      Template pulse profile parameters
+
+        phases    :   np.ndarray of dtype float
+                      Photon phases
+
+        num_samples : Number of samples to draw, default = 1000
+
+        Returns
+        ----------
+        samples   :   jnp.ndarray of dtype float32
+                      NUTS samples, in the sampling parameter space
+                      These can be converted to physical parameters
+                      using self._samples_to_phys
+        """
+
+        MT_Sigma_inv_M, MT_Sigma_inv_R = self.setup_leastsq_given_z_tau(mu_z, sigma_z)
+        logprob_fn = lambda x: self.logprob_fn(x, MT_Sigma_inv_M, MT_Sigma_inv_R)
+
+        x = self._phys_to_samples(hyp)
+        state = blackjax.nuts.init(x, logprob_fn)
+
+        one_step = lambda state, key: self.kernel(
+            key, state, MT_Sigma_inv_M, MT_Sigma_inv_R
+        )
+        hyp_keys = jax.random.split(key, num_samples + 1)
+
+        _, samples = jax.lax.scan(one_step, state, hyp_keys[:-1])
+
+        return samples, hyp_keys[-1]
+
+    def sample_lambda_theta_given_tau_zm(self, hyp, mu_z, sigma_z, key, num_steps=10):
+
+        hyp_samples, key = self.sample(hyp, mu_z, sigma_z, key, num_steps)
+
+        new_hyp = hyp_samples[0][-1]
+        all_hyp = self._fill_noise_pars(new_hyp)
+        inv_prior_cov, logdet_prior = self._make_psd_cov(all_hyp)
+
+        theta, phase_shifts, key = self.sample_theta_given_lambda_z_m_tau(
+            mu_z, sigma_z, inv_prior_cov, key
+        )
+
+        return new_hyp, theta, phase_shifts, key

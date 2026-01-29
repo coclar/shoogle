@@ -27,11 +27,12 @@ pint.logging.setup(level="WARNING")
 from shoogle.plot_gibbs_results import GibbsResults, fermi_lc
 from shoogle.utils import *
 from shoogle.noise_models import BrokenPowerLaw, FlatTailBrokenPowerLaw
-from shoogle.conditional_samplers import (
-    TemplateSampler,
-    LatentVariableSampler,
-    EdepTemplateSampler,
-)
+from shoogle.conditional_samplers import *
+
+import jax
+
+jax.config.update("jax_enable_x64", True)
+import jax.numpy as jnp
 
 
 def read_input_ft1_file(infile, FT2, weightfield, wmin, ephem_str):
@@ -318,6 +319,23 @@ class Gibbs(object):
             )
             self.radio_resids -= np.mean(self.radio_resids)
 
+        if self.nhyp > 0:
+            if self.has_OPV:
+                PB0 = self.PB0
+            else:
+                PB0 = None
+            self.timing_sampler = NoiseAndTimingModelSampler(
+                self.phi,
+                self.M,
+                self.theta_prior,
+                self.timing_parameter_uncertainties,
+                self.noise_models,
+                self.parameter_scales,
+                PB0,
+            )
+        else:
+            self.timing_sampler = TimingModelSampler(self.phi, self.M, self.theta_prior)
+
         return
 
     def _lambda_emcee_logL_wrapper(self, x):
@@ -569,9 +587,6 @@ class Gibbs(object):
         # Taking values/uncertainties in .par file as priors
         K = self.timing_parameter_uncertainties**2
 
-        if self.fit_OPV:
-            K = np.append(K, np.zeros(2 * self.nOPVfreqs))
-
         s = 0
         for component in self.noise_models:
             n = component.npar
@@ -715,6 +730,9 @@ class Gibbs(object):
 
         if self.has_OPV:
             self.theta_prior = np.concatenate((np.zeros(self.n_timing_pars), -orbwaves))
+            self.timing_parameter_uncertainties = np.concatenate(
+                (self.timing_parameter_uncertainties, np.zeros(len(orbwaves)))
+            )
         else:
             self.theta_prior = np.zeros(self.n_timing_pars)
 
@@ -894,6 +912,7 @@ class Gibbs(object):
         fermi_lc(np.mod(self.phi, 1.0), self.w, ax=ax[0], xbins=100)
         S = np.sum(self.w**2) / 100
         B = np.sum(self.w * (1 - self.w)) / 100
+
         if self.Edep:
             template = self.tau_sampler.template(
                 self.tau_sampler.tau_0,
@@ -917,39 +936,41 @@ class Gibbs(object):
         else:
             plt.close()
 
+        key = None
+
         if resume is True:
             dat = np.load(outputfile + ".npz")
             self.template_chain = dat["template_chain"]
 
             tau = self.template_chain[-1]
-            self.tau_sampler.setup_sampler(self.phi - phase_shifts)
+            self.tau_sampler.tau_0 = np.array(tau)
 
             self.loglike_chain = dat["loglike_chain"]
+            self.timing_chain = dat["timing_chain"]
+            if self.has_OPV:
+                self.opv_amps_chain = dat["opv_amps_chain"]
+
+                theta = np.concatenate(
+                    (self.timing_chain[-1, :], self.opv_amps_chain[-1, :])
+                )
+            phase_shifts = self.M @ theta
+            phase_shifts -= np.mean(phase_shifts)
+
             if self.nhyp > 0:
                 self.hyp_chain = dat["hyp_chain"]
-                self.lambda_autocorr_time = dat["lambda_autocorr_time"]
-                self.lambda_emcee_cov = dat["lambda_emcee_cov"]
                 hyp = self.hyp_chain[-1]
+                mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
+                    tau, jnp.array(self.phi - phase_shifts), key
+                )
+                self.timing_sampler.hyp_0 = hyp
             else:
                 hyp = np.array([])
                 for component in self.noise_models:
                     hyp = np.append(hyp, component.x0)
                 self._make_psd_cov(hyp)
-
-            self.timing_chain = dat["timing_chain"]
-
-            if self.has_OPV:
-                self.opv_amps_chain = dat["opv_amps_chain"]
-
-            theta = np.concatenate(
-                (self.timing_chain[-1, :], self.opv_amps_chain[-1, :])
-            )
-            phase_shifts = self.M @ theta
-            phase_shifts -= np.mean(phase_shifts)
-            c = len(self.loglike_chain)
-
         else:
             self.timing_chain = np.zeros((update, self.n_timing_pars))
+            tau = self.tau_sampler.tau_0
 
             if self.has_OPV:
                 self.opv_amps_chain = np.zeros((update, self.nOPVfreqs * 2))
@@ -969,35 +990,86 @@ class Gibbs(object):
             self.loglike_chain = np.zeros(update)
             phase_shifts = np.zeros(self.nphot)
 
-            if not hasattr(self.tau_sampler, "kernel"):
-                tau = self.tau_sampler.setup_sampler(self.phi - phase_shifts)
-            else:
-                tau = self.tau_sampler.tau_0
+        if not hasattr(self.tau_sampler, "kernel"):
+            print("Setting up template sampler")
+            tau, key = self.tau_sampler.setup_sampler(self.phi - phase_shifts)
 
-            if self.nhyp > 0:
-                if not hasattr(self, "lambda_emcee_cov"):
-                    mu_z, sigma_z = self.zm_sampler.sample_z_given_theta_tau(
-                        tau, self.phi - phase_shifts
+        if self.nhyp > 0:
+            self.timing_sampler.hyp_0 = jnp.array(hyp)
+            if not hasattr(self.timing_sampler, "kernel"):
+                print("Setting up hyper-parameter sampler")
+                mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
+                    tau, self.phi - phase_shifts, key
+                )
+                hyp, key = self.timing_sampler.setup_sampler(mu_z, sigma_z)
+
+        c = 0
+
+        if key is None:
+            key = jax.random.key(0)
+        keys = jax.random.split(key, 10000)
+
+        jphi = jnp.array(self.phi)
+        if self.nhyp > 0:
+            state = (phase_shifts, tau, hyp)
+
+            @jax.jit
+            def gibbs_sampling_loop(state, key):
+
+                phase_shifts = state[0]
+                tau = state[1]
+                hyp = state[2]
+
+                tau, key = self.tau_sampler.sample_tau_given_theta(
+                    tau, jphi - phase_shifts, key
+                )
+                mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
+                    tau, jphi - phase_shifts, key
+                )
+                hyp, theta, phase_shifts, key = (
+                    self.timing_sampler.sample_lambda_theta_given_tau_zm(
+                        hyp, mu_z, sigma_z, key
                     )
-                    self._setup_leastsq_given_z_tau(mu_z, sigma_z)
-                    self._tune_lambda_sampler(hyp, progress=True)
+                )
 
-            c = 0
+                return (phase_shifts, tau, hyp), (tau, hyp, theta)
 
-        if plots:
-            plt.ion()
-            fig, ax = plt.subplots(1, 3, figsize=(15, 5))
         else:
-            progress = tqdm(
-                total=n_acor_target * update, desc="Gibbs sampling", smoothing=0.0
-            )
-            start_time = time.time()
-            progress.start_t = start_time
-            progress.last_print_t = start_time
+            state = (phase_shifts, tau)
+
+            inv_prior_cov = jnp.array(self.inv_prior_cov)
+
+            @jax.jit
+            def gibbs_sampling_loop(state, key):
+
+                phase_shifts = state[0]
+                tau = state[1]
+
+                tau, key = self.tau_sampler.sample_tau_given_theta(
+                    tau, jphi - phase_shifts, key
+                )
+                mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
+                    tau, jphi - phase_shifts, key
+                )
+                theta, phase_shifts, key = (
+                    self.timing_sampler.sample_theta_given_tau_zm(mu_z, sigma_z, key)
+                )
+
+                return (phase_shifts, tau), (tau, theta)
+
+        progress = tqdm(
+            total=n_acor_target * update, desc="Gibbs sampling", smoothing=0.0
+        )
+        start_time = time.time()
+        progress.start_t = start_time
+        progress.last_print_t = start_time
 
         while (c < update or n_acor < n_acor_target) and (c < max_iterations):
 
             if c == len(self.loglike_chain):
+                keys = jax.random.split(key, update + 1)
+                key = keys[-1]
+
                 self.loglike_chain = np.append(self.loglike_chain, np.zeros(update))
                 self.timing_chain = np.append(
                     self.timing_chain, np.zeros((update, self.n_timing_pars)), axis=0
@@ -1020,58 +1092,15 @@ class Gibbs(object):
                         self.hyp_chain, np.zeros((update, self.nhyp)), axis=0
                     )
 
-            # 1) Update template pulse profile
-            tau = self.tau_sampler.sample_tau_given_theta(
-                tau, self.phi - phase_shifts, num_steps=5
-            )
+            state, samples = gibbs_sampling_loop(state, keys[c % update])
 
-            # 2) Assign photons to components given previous timing model and template pulse prof.
-            mu_z, sigma_z = self.zm_sampler.sample_z_given_theta_tau(
-                tau, self.phi - phase_shifts
-            )
-            self._setup_leastsq_given_z_tau(mu_z, sigma_z)
-
-            # 3) Sample hyperparameters using Metropolis-Hastings on p(lambda | X, tau, z)
-            #    (This is marginalised over the timing model)
+            tau = samples[0]
             if self.nhyp > 0:
-                hyp = self._sample_lambda_given_z_tau(hyp)
-
+                hyp = samples[1]
+                theta = samples[2]
             else:
-                post_cov_inv = self.MT_Sigma_inv_M + self.inv_prior_cov
-                post_cov_inv_U = cholesky(post_cov_inv, lower=False)
+                theta = samples[1]
 
-                self.post_cov_inv_U = post_cov_inv_U
-                self.logdet_post = 0
-                # self.Tobs = self.t.max() - self.t.min()
-
-                self.theta_opt = cho_solve(
-                    (post_cov_inv_U, False),
-                    self.MT_Sigma_inv_resids + self.inv_prior_cov @ self.theta_prior,
-                )
-
-            # 4) Sample timing model from p(theta | X, tau, z, lambda)
-            (theta, phase_shifts) = self._sample_theta_given_lambda_z_tau()
-
-            chi2 = np.sum((theta - self.theta_prior) ** 2 * self.inv_prior_cov)
-            Htest, logL = self._Htest_logL(tau, phase_shifts)
-            logpost = logL - 0.5 * chi2 - 0.5 * self.logdet_prior
-
-            if plots:
-                print(
-                    c,
-                    "H = ",
-                    Htest,
-                    "logL = ",
-                    logL,
-                    "chi2 = ",
-                    chi2,
-                    "logdet_prior =",
-                    self.logdet_prior,
-                    "logpost = ",
-                    logpost,
-                )
-
-            self.loglike_chain[c] = logpost
             self.timing_chain[c] = theta[: self.n_timing_pars]
             self.template_chain[c] = tau
 
@@ -1103,8 +1132,6 @@ class Gibbs(object):
                 if self.nhyp > 0:
                     output_dict_hyp = {
                         "hyp_chain": self.hyp_chain[: c + 1],
-                        "lambda_emcee_cov": self.lambda_emcee_cov,
-                        "lambda_autocorr_time": self.lambda_autocorr_time,
                     }
                     output_dict.update(output_dict_hyp)
 
@@ -1113,9 +1140,9 @@ class Gibbs(object):
                 start = 0
 
                 all_chains = self.timing_chain[start:c]
-                #np.concatenate(
+                # np.concatenate(
                 #    (self.timing_chain[start:c], self.template_chain[start:c]), axis=1
-                #)
+                # )
 
                 if self.nhyp > 0:
                     all_chains = np.concatenate(
