@@ -19,7 +19,7 @@ class TemplateSampler(object):
     sampling procedure.
 
     It is implemented in JAX, for speed and to enable the use of the blackjax
-    NUTS sampler, which provides extremely efficient MCMC sampling.
+    NUTS sampler, which provides efficient MCMC sampling.
     """
 
     def __init__(self, proffile, weights, minsigma=0.005, maxsigma=0.25, maxwraps=2):
@@ -32,15 +32,17 @@ class TemplateSampler(object):
         proffile   : str
                      Text file containing the initial pulse profile shape.
                      This can be obtained using itemplate.py
-        maxwraps   : int, default = 2
-                     Maximum number of phase wraps to sum over.
-                     More wraps = more accurate, but slower.
+        weights    : np.ndarray, dtype = float
+                     Photon probability weights
         minsigma   : float, default = 0.005
                      Minimum width of a Gaussian peak in the pulse profile,
                      in fractions of a rotation. (default = 0.5% of a rotation)
         maxsigma   : float, default = 0.25
                      Minimum width of a Gaussian peak in the pulse profile,
                      in fractions of a rotation. (default = 25% of a rotation)
+        maxwraps   : int, default = 2
+                     Maximum number of phase wraps to sum over.
+                     More wraps = more accurate, but slower.
         """
         prims, norms = prim_io(proffile)
 
@@ -61,6 +63,32 @@ class TemplateSampler(object):
         self.w = jnp.array(weights)
 
     def template(self, tau, phases):
+        """
+        Evaluates the pulse profile template, checking the amplitude constraints
+
+        Parameters
+        ----------
+
+        tau       : array
+                    Template pulse profile parameters, in order:
+                    (amplitudes, positions, widths)
+
+                    Amplitudes should sum to < 1.0
+                    Positions should be between (0,1)
+                    Widths should be between the min and max values.
+
+        phases    : array
+                    Array of photon phases
+                    Should be between (0,1), though this is not enforced.
+                    Values outside the range spanned by maxwraps will be incorrect
+
+        Returns
+        -------
+
+        profile   : array
+                    The template pulse profile evaluated at the specified phases
+
+        """
 
         assert (
             np.sum(tau[: self.npeaks]) <= 1.0
@@ -130,16 +158,16 @@ class TemplateSampler(object):
         Parameters
         ----------
 
-        x    :   jax.numpy.ndarray of type float32
+        x    :   jax.numpy.ndarray
                  Location of the current point in the sample parameter space
 
         Returns
         ---------
 
-        tau          : jax.numpy.ndarrays of type float32
+        tau          : jax.numpy.ndarray
                        Pulse profile parameters to pass to self._jax_template
 
-        logprior     : jnp.float32
+        logprior     : float
                        the log-prior for these parameters, accounting for both
                        the priors (Dirichlet prior on amplitudes),
                        and the Jacobian of the logit transforms.
@@ -176,14 +204,14 @@ class TemplateSampler(object):
 
         Parameters
         ----------
-        tau        : jax.numpy.ndarray of dtype float32
+        tau        : jax.numpy.ndarray
                      Array of pulse profile parameters
-        phases     : jax.numpy.ndarray of dtype float32
+        phases     : jax.numpy.ndarray
                      Array of observed photon phases (in [0, 1]).
 
         Returns
         -------
-        logL       : jnp.float32
+        logL       : float
                      The log-likelihood of the data given the template parameters.
                      This is the sum over photons of log(weights * profile + (1 - weights)),
                      where the profile is the evaluated template.
@@ -206,18 +234,18 @@ class TemplateSampler(object):
 
         Parameters
         ----------
-        x          : jax.numpy.ndarray of dtype float32
+        x          : jax.numpy.ndarray
                      Array of unconstrained (logit-transformed) parameters
                      representing the current point in the parameter space.
                      Shape: (3 * npeaks,)
-        phases     : jax.numpy.ndarray of dtype float32
+        phases     : jax.numpy.ndarray
                      Array of observed photon phases (in [0, 1]).
-        weights    : jax.numpy.ndarray of dtype float32
+        weights    : jax.numpy.ndarray
                      Array of photon probability weights (in [0, 1]).
 
         Returns
         -------
-        log_post   : jnp.float32
+        log_post   : float
                      The log-posterior probability: log_prior + log_likelihood.
         """
         tau, logprior = self._samples_to_phys(x)
@@ -226,9 +254,19 @@ class TemplateSampler(object):
         return logprior + loglike
 
     def _phys_to_samples(self, tau):
+        """
+        Transforms from physically meaningful parameters (As, mus, sigmas)
+        to the unconstrained sampling space (logit-transformed).
 
-        # Add a tiny bit of unpulsed component to prevent numerical issues
-        # with the logit transform -> inf when U is close to 1.0
+        Parameters
+        ----------
+        tau        : jax.numpy.ndarray
+                     Array of template pulse profile parameters
+
+        Returns
+        -------
+        x          : Internal co-ordinates used for sampling with blackjax
+        """
 
         A = tau[: self.npeaks]
         mu = tau[self.npeaks : self.npeaks * 2]
@@ -236,7 +274,7 @@ class TemplateSampler(object):
 
         Bk = A.copy()
 
-        # Transform to beta-distributed variables with (0,1)
+        # Transform to beta-distributed variables within (0,1)
         # which ensures a Dirichlet prior on amplitudes + unpulsed comp.
         U = 1 - Bk[0]
         for p in range(1, self.npeaks):
@@ -262,11 +300,9 @@ class TemplateSampler(object):
 
         Parameters
         ----------
-        phases     : jax.numpy.ndarray of dtype float32
+        phases     : jax.numpy.ndarray
                      Array of observed photon phases (in [0, 1]).
         """
-
-        phases = jnp.array(phases)
 
         logprob_fn = lambda x: self._log_post(x, phases)
 
@@ -313,11 +349,14 @@ class TemplateSampler(object):
         Parameters
         ----------
 
-        tau       :   np.ndarray of dtype float
+        tau       :   jax.numpy.ndarray
                       Template pulse profile parameters
 
-        phases    :   np.ndarray of dtype float
+        phases    :   jax.numpy.ndarray
                       Photon phases
+
+        key       :   jax PRNGKeyArray
+                      Random number key
 
         num_samples : Number of samples to draw, default = 1000
 
@@ -327,11 +366,11 @@ class TemplateSampler(object):
                       NUTS samples, in the sampling parameter space
                       These can be converted to physical parameters
                       using self._samples_to_phys
+
+        key       :   A new PRNG key
         """
 
         x0 = self._phys_to_samples(tau)
-
-        phases = jnp.array(phases)
 
         logprob_fn = lambda x: self.logprob_fn(x, phases)
         state = blackjax.nuts.init(x0, logprob_fn)
@@ -344,30 +383,120 @@ class TemplateSampler(object):
         return samples, tau_keys[-1]
 
     def sample_tau_given_theta(self, tau, phases, key, num_steps=10):
+        """
+        Obtain one sample from the conditional distribution of tau
+
+        Parameters
+        ----------
+
+        tau        :  jax.numpy.ndarray
+                      Template pulse profile parameters,
+                      used as the starting point for the sampler
+
+        phases     :  jax.numpy.ndarray
+                      Photon phases
+
+        key        :  jax PRNGKeyArray
+                      Random number key
+
+        num_steps  : Number of steps to run before drawing a sample
+                      to reduce dependence on the starting point,
+                      default = 10
+
+        Returns
+        -------
+
+        sample     :  jax.numpy.ndarray
+                      A new sample of the template pulse profile parameters
+
+        key        :  jax PRNGKeyArray
+                      New random number key
+        """
 
         samples, key = self.sample(tau, phases, key, num_steps)
         return samples[0][-1], key
 
 
 class EdepTemplateSampler(TemplateSampler):
+    """A class extending the TemplateSampler to energy-dependent pulse profiles.
+    These are parameterised as low- and high-energy pulse profiles, with
+    profiles at intermediate energies obtained by linearly extrapolating
+    over log-energy between these two profiles.
+    """
 
     def __init__(
         self, proffile, weights, log10E, minsigma=0.005, maxsigma=0.25, maxwraps=2
     ):
+        """
+        Initialises the object, including reading a starting estimate for
+        the profile parameters from a file.
+
+        Parameters
+        ----------
+        proffile   : str
+                     Text file containing the initial pulse profile shape.
+                     This can be obtained using itemplate.py
+        weights    : np.ndarray, dtype = float
+                     Photon probability weights
+        log10E     : np.ndarray, dtype = float
+                     Log-energies (in MeV units)
+        minsigma   : float, default = 0.005
+                     Minimum width of a Gaussian peak in the pulse profile,
+                     in fractions of a rotation. (default = 0.5% of a rotation)
+        maxsigma   : float, default = 0.25
+                     Minimum width of a Gaussian peak in the pulse profile,
+                     in fractions of a rotation. (default = 25% of a rotation)
+        maxwraps   : int, default = 2
+                     Maximum number of phase wraps to sum over.
+                     More wraps = more accurate, but slower.
+        """
 
         super().__init__(proffile, weights, minsigma, maxsigma, maxwraps)
 
-        self.tau_0 = np.concatenate((self.tau_0, self.tau_0))
+        self.tau_0 = jnp.concatenate((self.tau_0, self.tau_0))
         self.log10E = jnp.array(log10E)
         self.log10E_frac = (self.log10E - self.log10E.min()) / (
             self.log10E.max() - self.log10E.min()
         )
 
     def template(self, tau, phases, log10E):
+        """
+        Evaluates the pulse profile template, checking the amplitude constraints
+
+        Parameters
+        ----------
+
+        tau       : array
+                    Template pulse profile parameters, in order:
+                    (amplitudes, positions, widths)
+
+                    Amplitudes should sum to < 1.0
+                    Positions should be between (0,1)
+                    Widths should be between the min and max values.
+
+        phases    : array
+                    Array of photon phases
+                    Should be between (0,1), though this is not enforced.
+                    Values outside the range spanned by maxwraps will be incorrect
+
+        log10E    : array
+                    Array of photon log-energies
+
+        Returns
+        -------
+
+        profile   : array
+                    The template pulse profile evaluated at the specified phases
+
+        """
 
         assert (
             np.sum(tau[: self.npeaks]) <= 1.0
-        ), "Error: sum of template amplitudes > 1"
+        ), "Error: sum of low-energy template amplitudes > 1"
+
+        assert (
+            np.sum(tau[3 * self.npeaks : 4 * self.npeaks]) <= 1.0
+        ), "Error: sum of high-energy template amplitudes > 1"
 
         tau = jnp.array(tau)
         phases = jnp.array(phases)
@@ -375,6 +504,36 @@ class EdepTemplateSampler(TemplateSampler):
         return self._jax_template(tau, phases, log10E)
 
     def _jax_template(self, tau, phases, log10E=None):
+        """
+        Evaluates the pulse profile template at the provided phases.
+
+        Parameters
+        ----------
+
+        tau        : jax.numpy.ndarray of dtype float32, shape (3 * npeaks,)
+                     Template pulse profile parameters, in order:
+                     (amplitudes, positions, widths)
+
+                     Amplitudes should sum to < 1.0
+                     Positions should be between (0,1)
+                     Widths should be between the min and max values.
+
+                     For speed, these conditions are *not* checked here.
+                     The prior transforms used for sampling guarantee them.
+
+        phases     : jax.numpy.ndarray of dtype float32
+                     Array of photon phases. Should all be between 0 and 1.
+
+        log10E     : jax.numpy.ndarray or None
+                     If None, uses the original log-energies
+                     Otherwise, evaluates at the specified log-energies
+
+        Returns
+        ---------
+
+        profile    : jax.numpy.ndarray
+                     The pulse profile, evaluated at the input phases.
+        """
 
         if log10E is None:
             log10E_frac = self.log10E_frac
@@ -410,6 +569,28 @@ class EdepTemplateSampler(TemplateSampler):
         return profile
 
     def _samples_to_phys(self, x):
+        """
+        Converts from parameters convenient for the sampler,
+        which are logit-transformed to ranges of (-inf,inf),
+        to physical parameters describing the pulse profile peaks.
+
+        Parameters
+        ----------
+
+        x    :   jax.numpy.ndarray
+                 Location of the current point in the sample parameter space
+
+        Returns
+        ---------
+
+        tau          : jax.numpy.ndarray
+                       Pulse profile parameters to pass to self._jax_template
+
+        logprior     : float
+                       the log-prior for these parameters, accounting for both
+                       the priors (Dirichlet prior on amplitudes),
+                       and the Jacobian of the logit transforms.
+        """
 
         tau_lo, logprior_lo = super()._samples_to_phys(x[: 3 * self.npeaks])
         tau_hi, logprior_hi = super()._samples_to_phys(x[3 * self.npeaks :])
@@ -419,6 +600,19 @@ class EdepTemplateSampler(TemplateSampler):
         return tau, logprior_lo + logprior_hi
 
     def _phys_to_samples(self, tau):
+        """
+        Transforms from physically meaningful parameters (As, mus, sigmas)
+        to the unconstrained sampling space (logit-transformed).
+
+        Parameters
+        ----------
+        tau        : jax.numpy.ndarray
+                     Array of template pulse profile parameters
+
+        Returns
+        -------
+        x          : Internal co-ordinates used for sampling with blackjax
+        """
 
         x_lo = super()._phys_to_samples(tau[: 3 * self.npeaks])
         x_hi = super()._phys_to_samples(tau[3 * self.npeaks :])
@@ -429,8 +623,27 @@ class EdepTemplateSampler(TemplateSampler):
 
 
 class LatentVariableSampler(object):
+    """A class for obtaining random draws of the latent variables,
+    z & m, which assign photons to profile peaks and phase wraps.
+    """
 
     def __init__(self, weights, npeaks, log10E=None, maxwraps=2):
+        """
+        Parameters
+        ----------
+
+        weights    : np.ndarray
+                     Photon probability weights
+
+        npeaks     : int
+                     Number of peaks in the pulse profile
+
+        log10E     : np.ndarray or None
+                     Photon log-energies, if the profile is energy-dependent
+
+        maxwraps   : int, default=2
+                     Max number of phase wraps
+        """
 
         self.w = weights
         self.maxwraps = maxwraps
@@ -448,6 +661,21 @@ class LatentVariableSampler(object):
         return
 
     def Einterp_tau(self, tau):
+        """
+        Obtain pulse profile parameters for each photon, interpolating over energies
+
+        Parameters
+        ----------
+
+        tau       : np.ndarray, size (6 * npeaks,)
+                    Pulse profile parameters
+
+        Returns
+        -------
+
+        tau_E     : np.ndarray, size (nphotons, 3 * npeaks)
+                    Pulse profile parameters specific to each photon
+        """
 
         tau_lo = tau[: 3 * self.npeaks]
         tau_hi = tau[3 * self.npeaks :]
@@ -457,6 +685,29 @@ class LatentVariableSampler(object):
         return tau_E
 
     def prior_z_given_tau(self, tau):
+        """
+        Calculate the prior probabilities for photon--peak assignments,
+        given the peak amplitudes and photon weights
+
+        Parameters
+        ----------
+
+        tau       : array, size = (3 * npeaks,)
+                                    or (6 * npeaks,) if energy-dependent
+                    Pulse profile parameters
+
+        Returns
+        -------
+
+        A_ik      : array, size = (nphotons, npeaks)
+                    Prior probabilities for each photon/peak pair
+
+        U_i       : array, size = (nphotons,)
+                    Prior probability for unpulsed component of pulsar flux
+
+        B_i       : array, size = (nphotons,)
+                    Prior probability of photon coming from the background
+        """
 
         if len(tau) // 3 == 2 * self.npeaks:
             tau_E = self.Einterp_tau(tau)
@@ -478,6 +729,31 @@ class LatentVariableSampler(object):
         return A_ik, U_i, B_i
 
     def likelihood_z_given_theta_tau(self, tau, phases):
+        """
+        Calculates the likelihoods for photon--peak assignments
+
+        Parameters
+        ----------
+
+        tau       : Array, size = (3 * npeaks,)
+                                    or (6 * npeaks,) if energy-dependent
+                    Pulse profile parameters
+
+        phases    : Array, size = (nphotons,)
+                    Photon phases
+
+        Returns
+        -------
+
+        log_like  : Array, size = (nphotons, npeaks)
+                    Log-likelihood for photon--peak assignments
+
+        mu        : Array, size = (1, npeaks) or (nphotons, npeaks)
+                    Peak positions (photon-specific if energy dependence)
+
+        sigma     : Array, size = (1, npeaks) or (nphotons, npeaks)
+                    Peak widths (photon-specific if energy dependence)
+        """
 
         if len(tau) // 3 == 2 * self.npeaks:
             tau_E = self.Einterp_tau(tau)
@@ -506,6 +782,44 @@ class LatentVariableSampler(object):
         return log_like, mu, sigma
 
     def post_z_given_theta_tau(self, tau, phases):
+        """
+        Calculates the posterior probabilities for photon--peak assignments
+
+        Parameters
+        ----------
+
+        tau       : Array, size = (3 * npeaks,)
+                                    or (6 * npeaks,) if energy-dependent
+                    Pulse profile parameters
+
+        phases    : Array, size = (nphotons,)
+                    Photon phases
+
+        Returns
+        -------
+
+        A_ik      : array, size = (nphotons, npeaks)
+                    Prior probabilities for each photon/peak pair
+
+        U_i       : array, size = (nphotons,)
+                    Prior probability for unpulsed component of pulsar flux
+
+        B_i       : array, size = (nphotons,)
+                    Prior probability of photon coming from the background
+
+        log_like  : Array, size = (nphotons, npeaks)
+                    Log-likelihood for photon--peak assignments
+
+        rho       : Array, size = (nphotons, npeaks + 2)
+                    Posterior probabilities for peaks/unpulsed/background
+
+        mu        : Array, size = (1, npeaks) or (nphotons, npeaks)
+                    Peak positions (photon-specific if energy dependence)
+
+        sigma     : Array, size = (1, npeaks) or (nphotons, npeaks)
+                    Peak widths (photon-specific if energy dependence)
+
+        """
 
         A_ik, U_i, B_i = self.prior_z_given_tau(tau)
         log_like, mu, sigma = self.likelihood_z_given_theta_tau(tau, phases)
@@ -527,6 +841,34 @@ class LatentVariableSampler(object):
         return A_ik, U_i, B_i, log_like, rho, mu, sigma
 
     def sample_z_given_theta_tau(self, tau, phases, key):
+        """
+        Draws random z, m vectors, and returns the resulting per-photon
+        peak position and width
+
+
+        Parameters
+        ----------
+
+        tau       : Array, size = (3 * npeaks,)
+                                    or (6 * npeaks,) if energy-dependent
+                    Pulse profile parameters
+
+        phases    : Array, size = (nphotons,)
+                    Photon phases
+
+        key       : JAX PRNG key
+
+        Returns
+        -------
+
+        mu_z        : Array, size = (nphotons,)
+                    Photon-specific peak positions (0 if unpulsed/background)
+
+        sigma_z     : Array, size = (nphotons,)
+                    Photon-specific peak widths (0 if unpulsed/background)
+
+        next_key    : JAX PRNG key
+        """
 
         A_ik, U_i, B_i, log_like, rho, mu, sigma = self.post_z_given_theta_tau(
             tau, phases
@@ -566,8 +908,23 @@ class LatentVariableSampler(object):
 
 
 class TimingModelSampler(object):
+    """A class for obtaining random samples of the timing model, given the
+    latent variables and template pulse profile"""
 
     def __init__(self, phi, M, theta_prior):
+        """
+        Parameters
+        ----------
+
+        phi        : Array, size (nphotons,)
+                     Photon phases
+
+        M          : Array, size (nphotons, npars)
+                     Design matrix
+
+        theta_prior : Array, size (npars,)
+                      Prior means for timing model parameters
+        """
 
         self.phi = phi
         self.npar = np.shape(M)[1]
@@ -575,6 +932,28 @@ class TimingModelSampler(object):
         self.theta_prior = jnp.array(theta_prior)
 
     def setup_leastsq_given_z_tau(self, mu_z, sigma_z):
+        """
+        Computes M^T Sigma^{-1} M and M^T Sigma^{-1} R required for the
+        weighted least squares fit to the timing model
+
+        Parameters
+        ----------
+
+        mu_z        : Array, size (nphotons,)
+                      Peak positions for each photon (0 if unpulsed/background)
+
+        sigma_z        : Array, size (nphotons,)
+                      Peak widths for each photon (0 if unpulsed/background)
+
+        Returns
+        -------
+
+        MT_Sigma_inv_M : Array, size (npars, npars)
+                         Inverse covariance matrix for timing parameter likelihood
+
+        MT_Sigma_inv_R : Array, size (npars,)
+                         RHS for WLS fit
+        """
 
         resids = self.phi - mu_z
         precisions = jnp.where(sigma_z > 0, 1.0 / sigma_z**2, 0.0)
@@ -585,7 +964,33 @@ class TimingModelSampler(object):
         return MT_Sigma_inv_M, MT_Sigma_inv_R
 
     def solve_leastsq(self, MT_Sigma_inv_M, MT_Sigma_inv_R, inv_prior_cov):
+        """
+        Solves the weighted least squares fit to the timing model to find the
+        conditional distribution on the timing model given the latent variables
+        /pulse profile.
 
+        Parameters
+        ----------
+
+        MT_Sigma_inv_M : Array, size (npars, npars)
+                         Inverse covariance matrix for timing parameter likelihood
+
+        MT_Sigma_inv_R : Array, size (npars,)
+                         RHS for WLS fit
+
+        inv_prior_cov  : Array, size (npars, npars)
+                         Inverse covariance matrix for timing parameter priors
+
+        Returns
+        -------
+
+        theta_opt      : Array, size (npars,)
+                         Posterior mean for timing model parameters
+
+        post_cov_inv_U : Array, size (npars,npars)
+                         Upper-triangular Cholesky decomposition, U where C = U^T U
+                         for the posterior covariance matrix C
+        """
         post_cov_inv = jnp.asarray(MT_Sigma_inv_M + inv_prior_cov, dtype=jnp.float64)
         post_cov_inv_U = cholesky(post_cov_inv, lower=False)
 
@@ -595,8 +1000,35 @@ class TimingModelSampler(object):
 
         return theta_opt, post_cov_inv_U
 
-    def sample_theta_given_lambda_z_m_tau(self, mu_z, sigma_z, inv_prior_cov, key):
+    def sample_theta_given_lambda_tau_zm(self, mu_z, sigma_z, inv_prior_cov, key):
+        """
+        Draws a random sample of the timing model parameters given z,m,tau,lambda
 
+        Parameters
+        ----------
+
+        mu_z           : Array, size (nphotons,)
+                         Peak positions for each photon (0 if unpulsed/background)
+
+        sigma_z        : Array, size (nphotons,)
+                         Peak widths for each photon (0 if unpulsed/background)
+
+        inv_prior_cov  : Array, size (npars, npars)
+                         Inverse covariance matrix for timing parameter priors
+
+        key            : JAX PRNG key
+
+        Returns
+        -------
+
+        theta          : Array, size (npars,)
+                         Random draw of timing model parameters
+
+        phase_shifts   : Array, size (nphotons,)
+                         Phase shifts according to theta, relative to theta=0
+
+        key            : JAX PRNG key
+        """
         MT_Sigma_inv_M, MT_Sigma_inv_R = self.setup_leastsq_given_z_tau(mu_z, sigma_z)
         theta_opt, post_cov_inv_U = self.solve_leastsq(
             MT_Sigma_inv_M, MT_Sigma_inv_R, inv_prior_cov
@@ -612,6 +1044,28 @@ class TimingModelSampler(object):
 
 
 def bpl_powspec(pars, freqs):
+    """
+    Evaluates a smoothly broken power-law PSD
+
+    PSD = (A^2 yr^3 / 12 pi^2) * (fc / fyr)^(-gamma) * (1 + (f / fc)^2)^(-gamma/2)
+
+    Parameters
+    ----------
+
+    pars      : Array, size = (3,) (or longer)
+                PSD parameters: (log10A (log-amplitude at reference freq of 1/yr),
+                                 log10fc (log10 of corner frequency, in units 1/yr)
+                                 gamma (spectral index))
+
+    freqs     : Array, size = (nfreq,)
+                Frequencies to evaluate PSD at, in units of 1/yr
+
+    Returns
+    -------
+
+    PSD       : Array, size = (nfreq,)
+                Power-spectral density, in units of s^2 d
+    """
 
     logA = pars[0]
     logfc = pars[1]
@@ -629,6 +1083,30 @@ def bpl_powspec(pars, freqs):
 
 
 def bpl_flattail_powspec(pars, freqs):
+    """
+    Evaluates a smoothly broken power-law PSD with a flat-tail
+
+    PSD = max((A^2 yr^3 / 12 pi^2) * (fc / fyr)^(-gamma) * (1 + (f / fc)^2)^(-gamma/2),
+              kappa^2)
+
+    Parameters
+    ----------
+
+    pars      : Array, size = (3,) (or longer)
+                PSD parameters: (log10A (log-amplitude at reference freq of 1/yr),
+                                 log10fc (log10 of corner frequency, in units 1/yr)
+                                 gamma (spectral index),
+                                 log10kappa (log-amplitude of flat tail))
+
+    freqs     : Array, size = (nfreq,)
+                Frequencies to evaluate PSD at, in units of 1/yr
+
+    Returns
+    -------
+
+    PSD       : Array, size = (nfreq,)
+                Power-spectral density, in units of s^2 d
+    """
 
     bpl = self.bpl_powspec(pars, freqs)
     logkappa = pars[3]
@@ -640,6 +1118,8 @@ def bpl_flattail_powspec(pars, freqs):
 
 
 class NoiseAndTimingModelSampler(TimingModelSampler):
+    """A class for obtaining random samples of the noise parameters and timing model,
+    given the latent variables and template pulse profile"""
 
     def __init__(
         self,
@@ -651,6 +1131,31 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         parameter_scales,
         PB0=None,
     ):
+        """
+        Parameters
+        ----------
+
+        phi        : Array, size (nphotons,)
+                     Photon phases
+
+        M          : Array, size (nphotons, npars)
+                     Design matrix
+
+        theta_prior : Array, size (npars,)
+                      Prior means for timing model parameters
+
+        timing_prior_uncertainties : Array, size (npars,)
+                      Prior widths for timing model parameters
+
+        noise_models : list
+                       shoogle noise models
+
+        parameter_scales : Array, size (npars,)
+                      Parameter scales used to ensure numerical stability
+
+        PB0          : float, or None
+                       Necessary if fitting OPVs to scale the orbital phase PSD
+        """
 
         self.phi = phi
         self.npar = np.shape(M)[1]
@@ -714,6 +1219,19 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         self.linear_priors = jnp.array(linear_priors)
 
     def _phys_to_samples(self, hyp):
+        """
+        Transforms from physically meaningful hyperparmeters
+        to the unconstrained sampling space (logit-transformed).
+
+        Parameters
+        ----------
+        hyp        : jax.numpy.ndarray
+                     Array of hyperparameters
+
+        Returns
+        -------
+        x          : Internal co-ordinates used for sampling with blackjax
+        """
 
         cube_pars = (hyp - self.hyp_bounds[:, 0]) / (
             self.hyp_bounds[:, 1] - self.hyp_bounds[:, 0]
@@ -721,6 +1239,28 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         return jax.scipy.special.logit(cube_pars)
 
     def _samples_to_phys(self, x):
+        """
+        Converts from parameters convenient for the sampler,
+        which are logit-transformed to ranges of (-inf,inf),
+        to physically-meaningful hyperparameters
+
+        Parameters
+        ----------
+
+        x    :   jax.numpy.ndarray
+                 Location of the current point in the sample parameter space
+
+        Returns
+        ---------
+
+        hyp          : jax.numpy.ndarray
+                       Hyper-parameters
+
+        logprior     : float
+                       the log-prior for these parameters, accounting for both
+                       the priors (possible linear-uniform prior on noise amplitudes)
+                       and the Jacobian of the logit transforms.
+        """
 
         cube_pars = jax.scipy.special.expit(x)
         logprior = jnp.sum(jnp.log(cube_pars * (1 - cube_pars)))
@@ -738,12 +1278,45 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         return hyp, logprior + amp_prior
 
     def _fill_noise_pars(self, hyp):
+        """
+        Obtains the full array hyperparameters (including fixed values)
+        given values of the free parameters
+
+        Parameters
+        ----------
+
+        hyp          : Array
+                       Free hyperparameter values
+
+        Returns
+        -------
+
+        all_hyp      : Array
+                       All PSD parameters, including both free and fixed values
+        """
 
         all_hyp = self.fixed_hyp.at[self.free_par_indices].set(hyp)
 
         return all_hyp
 
     def _make_psd_cov(self, all_hyp):
+        """
+        Computes the inverse prior covariance matrix
+
+        Parameters
+        ----------
+
+        all_hyp     : Array
+                      All necessary PSD parameters
+
+        Returns
+        -------
+
+        inv_prior_cov : Array, size (npars, npars)
+                        Inverse prior covariance matrix
+
+        logdet_prior : Log-determinant of prior covariance matrix)
+        """
 
         K = self.K0.copy()
 
@@ -772,6 +1345,26 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         return jnp.diag(Kinv), logdet_prior
 
     def log_post(self, x, MT_Sigma_inv_M, MT_Sigma_inv_R):
+        """
+        Computes the log-posterior for the hyperparameters
+
+        Parameters
+        ----------
+
+        x     : Array, size (nhyp_free,)
+                Sampled values (in the logit-transformed space)
+
+        MT_Sigma_inv_M : Array, size (npars, npars)
+                         Inverse covariance matrix for timing parameter likelihood
+
+        MT_Sigma_inv_R : Array, size (npars,)
+                         RHS for WLS fit
+
+        Returns
+        -------
+
+        logpost      : Log-posterior probability
+        """
 
         hyp, logprior = self._samples_to_phys(x)
         all_hyp = self._fill_noise_pars(hyp)
@@ -785,21 +1378,30 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         prior_chi2 = self.theta_prior @ (inv_prior_cov @ self.theta_prior)
         post_chi2 = jnp.sum((post_cov_inv_U @ theta_opt) ** 2)
         logdet_post = -2 * jnp.sum(jnp.log(jnp.diag(post_cov_inv_U)))
-        logL = logprior - 0.5 * (logdet_prior + prior_chi2 - logdet_post - post_chi2)
+        logpost = logprior - 0.5 * (logdet_prior + prior_chi2 - logdet_post - post_chi2)
 
-        return logL
+        return logpost
 
     def setup_sampler(self, mu_z, sigma_z):
         """
         Performs a warm-up run to tune parameters (step size, covariance matrix)
         of the blackjax NUTS sampler for efficient sampling later.
 
-        This also generates the
-
         Parameters
         ----------
-        phases     : jax.numpy.ndarray of dtype float32
-                     Array of observed photon phases (in [0, 1]).
+        mu_z           : Array, size (nphotons,)
+                         Peak positions for each photon (0 if unpulsed/background)
+
+        sigma_z        : Array, size (nphotons,)
+                         Peak widths for each photon (0 if unpulsed/background)
+
+        Returns
+        -------
+
+        hyp            : Array, size (nhyp_free,)
+                         Starting values for free hyperparameters after burn-in
+
+        key            : JAX PRNG key
         """
 
         x0 = self._phys_to_samples(self.hyp_0)
@@ -843,25 +1445,30 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
     def sample(self, hyp, mu_z, sigma_z, key, num_samples=1000):
         """
-        Run the blackjax NUTS sampler to estimate parameters of the template
+        Run the blackjax NUTS sampler to estimate hyperparameters
 
         Parameters
         ----------
 
-        tau       :   np.ndarray of dtype float
-                      Template pulse profile parameters
+        hyp       :   Array
+                      Initial hyperparameters as a starting point
 
-        phases    :   np.ndarray of dtype float
-                      Photon phases
+        mu_z           : Array, size (nphotons,)
+                         Peak positions for each photon (0 if unpulsed/background)
+
+        sigma_z        : Array, size (nphotons,)
+                         Peak widths for each photon (0 if unpulsed/background)
+
+        key         : JAX PRNG key
 
         num_samples : Number of samples to draw, default = 1000
 
         Returns
         ----------
-        samples   :   jnp.ndarray of dtype float32
-                      NUTS samples, in the sampling parameter space
-                      These can be converted to physical parameters
-                      using self._samples_to_phys
+        samples   :   Array
+                      Hyperparameter samples
+
+        key         : JAX PRNG key
         """
 
         MT_Sigma_inv_M, MT_Sigma_inv_R = self.setup_leastsq_given_z_tau(mu_z, sigma_z)
@@ -880,6 +1487,43 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         return samples, hyp_keys[-1]
 
     def sample_lambda_theta_given_tau_zm(self, hyp, mu_z, sigma_z, key, num_steps=10):
+        """
+        Draw random samples of hyperparameters (via NUTS) and timing model
+        parameters (from Gaussian posterior), given template pulse profile and
+        photon--peak assignments
+
+        Parameters
+        ----------
+
+        hyp        :   Array
+                      Initial hyperparameters as a starting point
+
+        mu_z       : Array, size (nphotons,)
+                         Peak positions for each photon (0 if unpulsed/background)
+
+        sigma_z    : Array, size (nphotons,)
+                         Peak widths for each photon (0 if unpulsed/background)
+
+        key        : JAX PRNG key
+
+        num_steps  : Number of steps to run before drawing a sample
+                      to reduce dependence on the starting point,
+                      default = 10
+
+        Returns
+        ----------
+        new_hyp   :   Array
+                      New draw of hyperparameters
+
+        theta     :   Array
+                      New draw of timing model parameters
+
+        phase_shifts   : Array, size (nphotons,)
+                         Phase shifts according to theta, relative to theta=0
+
+        key         : JAX PRNG key
+
+        """
 
         hyp_samples, key = self.sample(hyp, mu_z, sigma_z, key, num_steps)
 
@@ -887,7 +1531,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         all_hyp = self._fill_noise_pars(new_hyp)
         inv_prior_cov, logdet_prior = self._make_psd_cov(all_hyp)
 
-        theta, phase_shifts, key = self.sample_theta_given_lambda_z_m_tau(
+        theta, phase_shifts, key = self.sample_theta_given_lambda_tau_zm(
             mu_z, sigma_z, inv_prior_cov, key
         )
 
