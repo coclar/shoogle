@@ -992,18 +992,19 @@ class Gibbs(object):
 
             self.template_chain = np.zeros((update, len(self.tau_sampler.tau_0)))
             self.loglike_chain = np.zeros(update)
-            phase_shifts = np.zeros(self.nphot)
+            phase_shifts = jnp.zeros(self.nphot)
 
+        jphi = jnp.array(self.phi)
         if not hasattr(self.tau_sampler, "kernel"):
             print("Setting up template sampler")
-            tau, key = self.tau_sampler.setup_sampler(self.phi - phase_shifts)
+            tau, key = self.tau_sampler.setup_sampler(jphi - phase_shifts)
 
         if self.nhyp > 0:
             self.timing_sampler.hyp_0 = jnp.array(hyp)
             if not hasattr(self.timing_sampler, "kernel"):
                 print("Setting up hyper-parameter sampler")
                 mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
-                    tau, self.phi - phase_shifts, key
+                    tau, jphi - phase_shifts, key
                 )
                 hyp, key = self.timing_sampler.setup_sampler(mu_z, sigma_z)
 
@@ -1013,7 +1014,6 @@ class Gibbs(object):
             key = jax.random.key(0)
         keys = jax.random.split(key, 10000)
 
-        jphi = jnp.array(self.phi)
         if self.nhyp > 0:
             state = (phase_shifts, tau, hyp)
 
@@ -1056,7 +1056,9 @@ class Gibbs(object):
                     tau, jphi - phase_shifts, key
                 )
                 theta, phase_shifts, key = (
-                    self.timing_sampler.sample_theta_given_tau_zm(mu_z, sigma_z, key)
+                    self.timing_sampler.sample_theta_given_lambda_tau_zm(
+                        mu_z, sigma_z, inv_prior_cov, key
+                    )
                 )
 
                 return (phase_shifts, tau), (tau, theta)

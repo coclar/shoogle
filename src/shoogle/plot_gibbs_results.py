@@ -313,9 +313,9 @@ class GibbsResults(object):
         s = self.psr.n_timing_pars
         n = len(self.psr.tau_sampler.tau_0)
         self.template_MAP = MAP[s : s + n]
+        s = s + n
 
         if self.psr.fit_TN or self.psr.fit_OPV:
-            s = s + n
             n = self.psr.nhyp
             self.hyp_MAP = MAP[s : s + n]
             s = s + n
