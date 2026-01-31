@@ -1277,8 +1277,10 @@ class GibbsResults(object):
             )
 
             pdf = np.exp(logL - logL.max())
-            pdf /= np.trapz(pdf, phi)
-            dphi_sq = np.trapz(phi**2 * pdf, phi) - np.trapz(phi * pdf, phi) ** 2
+            pdf /= np.trapezoid(pdf, phi)
+            dphi_sq = (
+                np.trapezoid(phi**2 * pdf, phi) - np.trapezoid(phi * pdf, phi) ** 2
+            )
 
             W = 2 * dphi_sq * self.psr.Tobs * u.d / self.psr.timing_model.F0.quantity**2
 
@@ -1344,9 +1346,10 @@ class GibbsResults(object):
             )
 
             pdf = np.exp(logL - logL.max())
-            pdf /= np.trapz(pdf, dTASC)
+            pdf /= np.trapezoid(pdf, dTASC)
             dTASC_sq = (
-                np.trapz(dTASC**2 * pdf, dTASC) - np.trapz(dTASC * pdf, dTASC) ** 2
+                np.trapezoid(dTASC**2 * pdf, dTASC)
+                - np.trapezoid(dTASC * pdf, dTASC) ** 2
             )
 
             W = 2 * (dTASC_sq * u.d**2) * self.psr.Tobs * u.d
@@ -1561,9 +1564,8 @@ class GibbsResults(object):
         Ebounds = np.log10(np.array([100, 300, 1000, 3000, 10000]))
         Eavg = np.average(self.psr.log10E, weights=self.psr.w)
 
-        xbins = 100
         phi = np.arange(0.0, 1.0, 0.001)
-        fig, ax = plt.subplots(len(Ebounds) - 1, 1, figsize=(8, 10), sharex=True)
+        fig, ax = plt.subplots(len(Ebounds) - 1, 1, figsize=(8, 12), sharex=True)
         for E in range(len(Ebounds) - 1):
             mask = np.where(
                 (self.psr.log10E > Ebounds[E]) & (self.psr.log10E < Ebounds[E + 1])
@@ -1598,15 +1600,15 @@ class GibbsResults(object):
                 prof,
                 color="orange",
                 alpha=1.0,
-                label=f"${10 ** (Ebounds[E] - 3):.2g}\\,{{\\rm GeV}} < E < {10 ** (Ebounds[E+1] - 3):.2g}\\,{{\\rm GeV}}$",
             )
+            ax[len(Ebounds) - 2 - E].set_title(
+                f"${10 ** (Ebounds[E] - 3):.2g}\\,{{\\rm GeV}} < E < {10 ** (Ebounds[E+1] - 3):.2g}\\,{{\\rm GeV}}$"
+            )
+
             avgprof = bkg + src * self.psr.tau_sampler.template(
                 self.template_MAP, phi, np.ones_like(phi) * Eavg
             )
-            ax[len(Ebounds) - 2 - E].plot(
-                phi, avgprof, color="red", ls="--", alpha=1.0, label="$E_{\\rm avg}$"
-            )
-            ax[len(Ebounds) - 2 - E].legend(loc="upper right")
+            ax[len(Ebounds) - 2 - E].plot(phi, avgprof, color="red", ls="--", alpha=1.0)
 
         ax[-1].set_xlim(0, 2)
         ax[-1].xaxis.set_visible(True)

@@ -4,13 +4,32 @@ from jax.scipy.linalg import cholesky, cho_solve, solve
 import jax.numpy as jnp
 import blackjax
 from scipy.special import logit, expit
-from pint.templates.lctemplate import LCTemplate, prim_io
 from tqdm.auto import tqdm
 from astropy import units as u
 
 ONE_OVER_SQRT2PI = 1.0 / (jnp.sqrt(2 * jnp.pi))
 YR3_TO_S2D = (1.0 * u.yr**3).to_value("s ** 2 * d")
 INVYR_TO_INVDAY = (1.0 / u.yr).to_value("1/d")
+
+
+def read_template(proffile):
+
+    with open(proffile, "r") as txt:
+        lines = txt.readlines()[2:]
+
+    amps = []
+    mus = []
+    sigmas = []
+
+    for line in lines:
+        if line.split()[0][:4] == "ampl":
+            amps.append(float(line.split()[2]))
+        elif line.split()[0][:4] == "phas":
+            mus.append(float(line.split()[2]))
+        elif line.split()[0][:4] == "fwhm":
+            sigmas.append(float(line.split()[2]) / (2 * np.sqrt(2 * np.log(2))))
+
+    return np.array(amps), np.array(mus), np.array(sigmas)
 
 
 class TemplateSampler(object):
@@ -22,7 +41,7 @@ class TemplateSampler(object):
     NUTS sampler, which provides efficient MCMC sampling.
     """
 
-    def __init__(self, proffile, weights, minsigma=0.005, maxsigma=0.25, maxwraps=2):
+    def __init__(self, proffile, weights, minsigma=0.001, maxsigma=0.25, maxwraps=2):
         """
         Initialises the object, including reading a starting estimate for
         the profile parameters from a file.
@@ -44,16 +63,11 @@ class TemplateSampler(object):
                      Maximum number of phase wraps to sum over.
                      More wraps = more accurate, but slower.
         """
-        prims, norms = prim_io(proffile)
-
-        self.A_0 = (
-            np.array([n for n in norms]) * 0.999
-        )  # This prevents nasty numerical issues...
-        self.mu_0 = np.array([p.get_location() for p in prims])
-        self.sigma_0 = np.array([p.get_width() for p in prims])
+        self.A_0, self.mu_0, self.sigma_0 = read_template(proffile)
+        self.A_0 *= 0.999  # This prevents nasty numerical issues...
 
         self.tau_0 = jnp.array(np.concatenate((self.A_0, self.mu_0, self.sigma_0)))
-        self.npeaks = len(prims)
+        self.npeaks = len(self.A_0)
 
         self.maxwraps = maxwraps
         self.wraps = jnp.arange(-2, 3)
@@ -425,7 +439,7 @@ class EdepTemplateSampler(TemplateSampler):
     """
 
     def __init__(
-        self, proffile, weights, log10E, minsigma=0.005, maxsigma=0.25, maxwraps=2
+        self, proffile, weights, log10E, minsigma=0.001, maxsigma=0.25, maxwraps=2
     ):
         """
         Initialises the object, including reading a starting estimate for
