@@ -31,7 +31,7 @@ from shoogle.conditional_samplers import *
 
 import jax
 
-jax.config.update("jax_enable_x64", True)
+#jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 
@@ -67,7 +67,7 @@ class Gibbs(object):
         parfile=None,
         ft1file=None,
         ft2file=None,
-        weightfield="MODEL_WEIGHT",
+        weightfield=None,
         templatefile=None,
         wmin=0.05,
         timfile=None,
@@ -200,7 +200,7 @@ class Gibbs(object):
                 FC_free = False
                 GAM0 = None
                 GAM_free = False
-                KAPPA0 = None
+                KAPPA0 = -20.0
                 KAPPA_free = False
 
                 for line in lines:
@@ -225,33 +225,20 @@ class Gibbs(object):
                     if A_free or FC_free or GAM_free or KAPPA_free:
                         self.fit_TN = True
 
-                    if KAPPA0 is not None:
-                        self.noise_models.append(
-                            FlatTailBrokenPowerLaw(
-                                self.WXfreqs,
-                                self.WXSinds,
-                                self.WXCinds,
-                                np.array(
-                                    [A_free, FC_free, GAM_free, KAPPA_free], dtype=bool
-                                ),
-                                self.Tobs,
-                                np.array([logA0, logFC0, GAM0, KAPPA0]),
-                                prefix,
-                            )
+                    self.noise_models.append(
+                        FlatTailBrokenPowerLaw(
+                            self.WXfreqs,
+                            self.WXSinds,
+                            self.WXCinds,
+                            np.array(
+                                [A_free, FC_free, GAM_free, KAPPA_free], dtype=bool
+                            ),
+                            self.Tobs,
+                            np.array([logA0, logFC0, GAM0, KAPPA0]),
+                            prefix,
                         )
+                    )
 
-                    else:
-                        self.noise_models.append(
-                            BrokenPowerLaw(
-                                self.WXfreqs,
-                                self.WXSinds,
-                                self.WXCinds,
-                                np.array([A_free, FC_free, GAM_free], dtype=bool),
-                                self.Tobs,
-                                np.array([logA0, logFC0, GAM0]),
-                                prefix,
-                            )
-                        )
                     if A_free == 2:
                         self.noise_models[-1].linear_amp_prior = True
                     nc += 1

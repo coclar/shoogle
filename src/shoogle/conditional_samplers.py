@@ -41,7 +41,7 @@ class TemplateSampler(object):
     NUTS sampler, which provides efficient MCMC sampling.
     """
 
-    def __init__(self, proffile, weights, minsigma=0.001, maxsigma=0.25, maxwraps=2):
+    def __init__(self, proffile, weights, minsigma=0.001, maxsigma=0.5, maxwraps=2):
         """
         Initialises the object, including reading a starting estimate for
         the profile parameters from a file.
@@ -439,7 +439,7 @@ class EdepTemplateSampler(TemplateSampler):
     """
 
     def __init__(
-        self, proffile, weights, log10E, minsigma=0.001, maxsigma=0.25, maxwraps=2
+        self, proffile, weights, log10E, minsigma=0.001, maxsigma=0.5, maxwraps=2
     ):
         """
         Initialises the object, including reading a starting estimate for
@@ -514,6 +514,7 @@ class EdepTemplateSampler(TemplateSampler):
 
         tau = jnp.array(tau)
         phases = jnp.array(phases)
+        log10E = jnp.array(log10E)
 
         return self._jax_template(tau, phases, log10E)
 
@@ -1005,7 +1006,7 @@ class TimingModelSampler(object):
                          Upper-triangular Cholesky decomposition, U where C = U^T U
                          for the posterior covariance matrix C
         """
-        post_cov_inv = jnp.asarray(MT_Sigma_inv_M + inv_prior_cov, dtype=jnp.float64)
+        post_cov_inv = MT_Sigma_inv_M + inv_prior_cov
         post_cov_inv_U = cholesky(post_cov_inv, lower=False)
 
         theta_opt = cho_solve(
@@ -1122,7 +1123,7 @@ def bpl_flattail_powspec(pars, freqs):
                 Power-spectral density, in units of s^2 d
     """
 
-    bpl = self.bpl_powspec(pars, freqs)
+    bpl = bpl_powspec(pars, freqs)
     logkappa = pars[3]
 
     flat = 10 ** (2 * logkappa) * YR3_TO_S2D
@@ -1340,7 +1341,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
                 jnp.where(
                     self.noise_freqs[c] > 0,
                     (
-                        bpl_powspec(all_hyp[c], self.noise_freqs[c])
+                        bpl_flattail_powspec(all_hyp[c], self.noise_freqs[c])
                         * self.min_freqs[c]
                         * INVYR_TO_INVDAY
                     ),

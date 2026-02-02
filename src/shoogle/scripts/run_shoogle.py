@@ -2,6 +2,8 @@ import sys
 from optparse import OptionParser
 import matplotlib.pyplot as plt
 
+
+from astropy.io import fits
 from shoogle.gibbs_sampler import Gibbs
 from shoogle.plot_gibbs_results import GibbsResults
 
@@ -21,7 +23,7 @@ def main(argv=None):
         "-W",
         "--weightfield",
         type="string",
-        default="WEIGHT",
+        default=None,
         help="Column name in FT1 file for photon weights",
     )
     parser.add_option(
@@ -96,12 +98,34 @@ def main(argv=None):
         print("Error: -o/--outputfile is a required argument", file=sys.stderr)
         sys.exit(1)
 
+
+    if options.weightfield is None:
+        weightfield = None
+        f = fits.open(options.ft1)
+        colnames = f[1].data.names
+
+        for c in colnames:
+            w = None
+            if c == "WEIGHT":
+                w = "WEIGHT"
+            elif c == "MODEL_WEIGHT":
+                w = "MODEL_WEIGHT"
+            elif c[:4] == "4FGL":
+                w = c
+
+            if w is not None:
+                if weightfield is not None:
+                    raise ValueError("Cannot unambiguously determine the weight column")
+                weightfield = w
+    else:
+        weightfield = options.weightfield        
+
     G = Gibbs(
         parfile=options.parfile,
         ft1file=options.ft1,
         ft2file=options.ft2,
         timfile=options.radio_toas,
-        weightfield=options.weightfield,
+        weightfield=weightfield,
         templatefile=options.template,
         wmin=options.weightcut,
         Edep=options.Edep,

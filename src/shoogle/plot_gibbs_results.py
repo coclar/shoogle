@@ -1251,31 +1251,21 @@ class GibbsResults(object):
             phase_shifts = self.psr.M @ theta
             phases = self.psr.phi + phase_shifts - np.mean(phase_shifts)
 
-            gaussians = []
-            for p in range(self.psr.npeaks):
-                gaussians.append(
-                    LCGaussian(
-                        p=[
-                            self.template_chain[s, 2 * self.psr.npeaks + p],
-                            np.mod(self.template_chain[s, self.psr.npeaks + p], 1.0),
-                        ]
+            phi = np.arange(-0.005, 0.005, 0.00001)
+
+            logL = np.zeros_like(phi)
+
+            for idx in range(len(phi)):
+                shifted_phases = np.mod(phases + phi[idx], 1.0)
+
+                logL[idx] = np.sum(
+                    np.log(
+                        self.psr.w * self.psr.tau_sampler.template(self.template_chain[s,:],shifted_phases,self.psr.log10E)
+                        + (1 - self.psr.w)
                     )
                 )
-
-            template = LCTemplate(
-                gaussians, norms=self.template_chain[s, : self.psr.npeaks]
-            )
-
-            phi = np.arange(-0.005, 0.005, 0.00001)
-            shifted_phases = np.mod(phases[:, None] + phi[None, :], 1.0)
-            logL = np.sum(
-                np.log(
-                    self.psr.w[:, None] * template(shifted_phases)
-                    + (1 - self.psr.w[:, None])
-                ),
-                axis=0,
-            )
-
+                if idx % 10 == 0:
+                    print(idx, "/", len(phi), end = "\r")
             pdf = np.exp(logL - logL.max())
             pdf /= np.trapezoid(pdf, phi)
             dphi_sq = (
