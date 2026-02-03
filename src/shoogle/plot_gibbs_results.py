@@ -14,6 +14,7 @@ import warnings
 import corner
 from emcee.autocorr import function_1d
 import sys
+
 from shoogle.utils import *
 from pint.templates.lctemplate import LCTemplate
 from pint.templates.lceprimitives import LCGaussian
@@ -879,7 +880,6 @@ class GibbsResults(object):
         for component in self.psr.noise_models:
             n = component.nfree
             p = component.all_parameters(hyp[s : s + n])
-            print(p)
             if kind == "TN" and component.prefix[:2] == "TN":
                 K += component.cov(t, p)
             elif kind == "OPV" and component.prefix[:3] == "OPV":
@@ -1258,12 +1258,21 @@ class GibbsResults(object):
             for idx in range(len(phi)):
                 shifted_phases = np.mod(phases + phi[idx], 1.0)
 
-                logL[idx] = np.sum(
-                    np.log(
-                        self.psr.w * self.psr.tau_sampler.template(self.template_chain[s,:],shifted_phases,self.psr.log10E)
-                        + (1 - self.psr.w)
+                if self.psr.Edep:
+                    logL[idx] = np.sum(
+                        np.log(
+                            self.psr.w * self.psr.tau_sampler.template(self.template_chain[s,:],shifted_phases,self.psr.log10E)
+                            + (1 - self.psr.w)
+                        )
                     )
-                )
+                else:
+                    logL[idx] = np.sum(
+                        np.log(
+                            self.psr.w * self.psr.tau_sampler.template(self.template_chain[s,:],shifted_phases)
+                            + (1 - self.psr.w)
+                        )
+                    )
+
                 if idx % 10 == 0:
                     print(idx, "/", len(phi), end = "\r")
             pdf = np.exp(logL - logL.max())
@@ -1360,6 +1369,7 @@ class GibbsResults(object):
         for component in self.psr.noise_models:
             if component.prefix[: len(kind)] == kind:
                 nc += 1
+
 
         component_psds = np.zeros((len(f), nit, nc))
 

@@ -160,9 +160,9 @@ class Gibbs(object):
 
         self.Edep = Edep
         if self.Edep:
-            self.tau_sampler = EdepTemplateSampler(templatefile, self.w, self.log10E)
+            self.tau_sampler = EdepTemplateSampler(templatefile, self.w, self.log10E, extra_phase=extra_phase)
         else:
-            self.tau_sampler = TemplateSampler(templatefile, self.w)
+            self.tau_sampler = TemplateSampler(templatefile, self.w, extra_phase=extra_phase)
 
         self.npeaks = self.tau_sampler.npeaks
 
@@ -893,6 +893,9 @@ class Gibbs(object):
 
         """
 
+        # check on GPUs
+        print(jax.devices())
+
         # template alignment check
         fig, ax = plt.subplots(2, 1, sharex=True, height_ratios=[1, 2], figsize=(5, 10))
         i = np.argsort(self.w)
@@ -944,6 +947,8 @@ class Gibbs(object):
                 theta = np.concatenate(
                     (self.timing_chain[-1, :], self.opv_amps_chain[-1, :])
                 )
+            else:
+                theta = self.timing_chain[-1, :]
             phase_shifts = self.M @ theta
             phase_shifts -= np.mean(phase_shifts)
 
@@ -980,6 +985,10 @@ class Gibbs(object):
             self.template_chain = np.zeros((update, len(self.tau_sampler.tau_0)))
             self.loglike_chain = np.zeros(update)
             phase_shifts = jnp.zeros(self.nphot)
+
+        if plots:
+            plt.ion()
+            fig, ax = plt.subplots(1, 3, figsize=(15, 5))
 
         jphi = jnp.array(self.phi)
         if not hasattr(self.tau_sampler, "kernel"):

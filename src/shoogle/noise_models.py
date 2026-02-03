@@ -44,6 +44,8 @@ class NoiseModel(object):
         self.free = np.array(free, dtype="bool")
         self.nfree = sum(free)
 
+        self.linear_amp_prior = False
+
         if len(self.x0) != len(self.free) != self.npar:
             raise ValueError("Incorrect number of hyperparameters specified")
 
@@ -72,11 +74,10 @@ class NoiseModel(object):
 
         if self.nfree == self.npar:
             p = np.copy(x)
-
+         
         else:
             c = 0
             p = np.copy(self.x0)
-
             for i in range(self.npar):
                 if self.free[i]:
                     p[i] = x[c]
@@ -185,7 +186,6 @@ class BrokenPowerLaw(NoiseModel):
             self.bounds[0] = [-15, -5]
             self.bounds[2] = [0.0, 10.0]
 
-        self.linear_amp_prior = False
 
     def cov(self, t, pars):
 
@@ -266,7 +266,7 @@ class FlatTailBrokenPowerLaw(NoiseModel):
                 -np.log10(self.Tobs * (u.d / u.yr)) + 2,
             ],
             [1, 7],
-            [-19, -9],
+            [-20, -9],
         ]
 
     """

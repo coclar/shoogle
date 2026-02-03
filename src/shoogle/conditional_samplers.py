@@ -6,30 +6,36 @@ import blackjax
 from scipy.special import logit, expit
 from tqdm.auto import tqdm
 from astropy import units as u
+import pickle
+from pint.templates.lctemplate import LCTemplate, prim_io
 
 ONE_OVER_SQRT2PI = 1.0 / (jnp.sqrt(2 * jnp.pi))
 YR3_TO_S2D = (1.0 * u.yr**3).to_value("s ** 2 * d")
 INVYR_TO_INVDAY = (1.0 / u.yr).to_value("1/d")
 
 
-def read_template(proffile):
+def read_template(proffile, extra_phase=None):
 
-    with open(proffile, "r") as txt:
-        lines = txt.readlines()[2:]
+    if ".pickle" in proffile:
+        with open(proffile, "rb") as input_file:
+            template = pickle.load(input_file)
+            input_file.close()
+    else:
+        primitives, norms = prim_io(proffile)
+        template = LCTemplate(primitives, norms)
 
-    amps = []
-    mus = []
-    sigmas = []
+    if extra_phase:
+        for prim in template.primitives:
+            new_location = (prim.get_location() + extra_phase) % 1
+            prim.set_location(new_location)
 
-    for line in lines:
-        if line.split()[0][:4] == "ampl":
-            amps.append(float(line.split()[2]))
-        elif line.split()[0][:4] == "phas":
-            mus.append(float(line.split()[2]))
-        elif line.split()[0][:4] == "fwhm":
-            sigmas.append(float(line.split()[2]) / (2 * np.sqrt(2 * np.log(2))))
+    amps = np.array([A for A in template.norms()])
+    mus = np.mod(
+        np.array([p.get_location() for p in template.primitives]), 1.0
+    )
+    sigmas = np.array([p.get_width() for p in template.primitives])
 
-    return np.array(amps), np.array(mus), np.array(sigmas)
+    return amps, mus, sigmas
 
 
 class TemplateSampler(object):
@@ -41,7 +47,7 @@ class TemplateSampler(object):
     NUTS sampler, which provides efficient MCMC sampling.
     """
 
-    def __init__(self, proffile, weights, minsigma=0.001, maxsigma=0.5, maxwraps=2):
+    def __init__(self, proffile, weights, minsigma=0.001, maxsigma=0.5, maxwraps=2, extra_phase=None):
         """
         Initialises the object, including reading a starting estimate for
         the profile parameters from a file.
@@ -63,7 +69,7 @@ class TemplateSampler(object):
                      Maximum number of phase wraps to sum over.
                      More wraps = more accurate, but slower.
         """
-        self.A_0, self.mu_0, self.sigma_0 = read_template(proffile)
+        self.A_0, self.mu_0, self.sigma_0 = read_template(proffile, extra_phase=extra_phase)
         self.A_0 *= 0.999  # This prevents nasty numerical issues...
 
         self.tau_0 = jnp.array(np.concatenate((self.A_0, self.mu_0, self.sigma_0)))

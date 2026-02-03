@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 
 
 from astropy.io import fits
+
 from shoogle.gibbs_sampler import Gibbs
 from shoogle.plot_gibbs_results import GibbsResults
 
@@ -131,6 +132,7 @@ def main(argv=None):
         Edep=options.Edep,
     )
 
+    
     G.sample(
         outputfile=options.outputfile,
         plots=(not options.quiet),
@@ -138,21 +140,21 @@ def main(argv=None):
         n_acor_target=options.nacor,
         update=options.update,
     )
+    
 
     if not options.quiet:
         res = GibbsResults(G)
         res.load_results(load_from=[options.outputfile + ".npz"], decimated=True)
         res.MAP_phases()
-        res.maxlogL_phases()
 
         res.write_tvsph(options.outputfile + "_MAP.tvsph", res.phi_MAP)
-        res.write_tvsph(options.outputfile + "_maxlogL.tvsph", res.phi_maxlogL)
         res.write_new_template(options.outputfile + "_prof.dat")
         if res.psr.has_OPV:
             res.write_new_parfile(options.outputfile + "_orbwaves.par")
             res.write_orbifunc_parfile(options.outputfile + "_orbifunc.par")
         else:
             res.write_new_parfile(options.outputfile + ".par")
+
 
         endfile = ".png"
         if G.fit_TN:
@@ -178,3 +180,4 @@ def main(argv=None):
         plt.savefig(options.outputfile + "_summary" + endfile, bbox_inches="tight")
 
         plt.show()
+
