@@ -365,6 +365,8 @@ class GibbsResults(object):
                     self.ORBWAVES_MAP[2 * nf + 1]
                 )
 
+        self.MAP_phases()
+
     def write_new_parfile(self, output_parfile):
 
         tm = self.MAP_timing_model
@@ -786,8 +788,8 @@ class GibbsResults(object):
         theta_MAP = np.copy(self.timing_MAP)
 
         if self.psr.has_TN:
-            theta_MAP[self.psr.WXSinds] -= self.psr.theta_prior[self.psr.WXSinds]
-            theta_MAP[self.psr.WXCinds] -= self.psr.theta_prior[self.psr.WXCinds]
+            theta_MAP[self.psr.WXSinds] = self.psr.theta_prior[self.psr.WXSinds]
+            theta_MAP[self.psr.WXCinds] = self.psr.theta_prior[self.psr.WXCinds]
 
         if self.psr.has_OPV:
             theta_MAP = np.append(theta_MAP, self.opv_amps_MAP)
@@ -810,11 +812,20 @@ class GibbsResults(object):
 
         mu_samples = np.sort(mu_samples, axis=1)
 
+        mu_sample_3sig_lo = np.quantile(mu_samples, norm.cdf(-3.0), axis=1)
+        mu_sample_3sig_hi = np.quantile(mu_samples, norm.cdf(3.0), axis=1)
         mu_sample_2sig_lo = np.quantile(mu_samples, norm.cdf(-2.0), axis=1)
         mu_sample_2sig_hi = np.quantile(mu_samples, norm.cdf(2.0), axis=1)
         mu_sample_1sig_lo = np.quantile(mu_samples, norm.cdf(-1.0), axis=1)
         mu_sample_1sig_hi = np.quantile(mu_samples, norm.cdf(1.0), axis=1)
 
+        ax.fill_betweenx(
+            self.psr.t,
+            mu_sample_3sig_lo,
+            mu_sample_3sig_hi,
+            alpha=0.1,
+            facecolor=color,
+        )
         ax.fill_betweenx(
             self.psr.t,
             mu_sample_2sig_lo,
@@ -831,6 +842,78 @@ class GibbsResults(object):
         )
         ax.set_xlim(-0.5, 0.5)
         ax.set_xlabel("$\\Delta \\phi(t)$")
+
+        return mu_samples
+
+    def plot_wx_models(self, ax, nsamps=1000, color="black"):
+
+        theta_MAP = np.copy(self.timing_MAP)
+
+        PHI0idx = np.where(self.parameter_names == "Offset")[0]
+        F0idx = np.where(self.parameter_names == "F0")[0]
+        F1idx = np.where(self.parameter_names == "F1")[0]
+        idxs = np.concatenate(
+            (PHI0idx, F0idx, F1idx, self.psr.WXSinds, self.psr.WXCinds)
+        )
+
+        mu_MAP = self.psr.M[:, PHI0idx] @ theta_MAP[PHI0idx]
+        mu_MAP += self.psr.M[:, F0idx] @ theta_MAP[F0idx]
+        mu_MAP += self.psr.M[:, F1idx] @ theta_MAP[F1idx]
+        mu_MAP += (
+            self.psr.M[:, self.psr.WXCinds] @ self.psr.theta_prior[self.psr.WXCinds]
+        )
+        mu_MAP += (
+            self.psr.M[:, self.psr.WXSinds] @ self.psr.theta_prior[self.psr.WXSinds]
+        )
+
+        mu_samples = np.zeros((len(self.psr.phi), nsamps))
+        for c, i in enumerate(
+            np.random.choice(
+                np.arange(np.shape(self.timing_chain)[0]), replace=True, size=nsamps
+            )
+        ):
+            theta = self.timing_chain[i, idxs]
+            mu_samples[:, c] = (
+                -(self.psr.M[:, idxs] @ theta - mu_MAP) / self.psr.timing_model.F0.value
+            )
+            if c % 10 == 0:
+                print(c, "/", nsamps, end="\r")
+
+        mu_samples = np.sort(mu_samples, axis=1)
+
+        mu_sample_3sig_lo = np.quantile(mu_samples, norm.cdf(-3.0), axis=1)
+        mu_sample_3sig_hi = np.quantile(mu_samples, norm.cdf(3.0), axis=1)
+        mu_sample_2sig_lo = np.quantile(mu_samples, norm.cdf(-2.0), axis=1)
+        mu_sample_2sig_hi = np.quantile(mu_samples, norm.cdf(2.0), axis=1)
+        mu_sample_1sig_lo = np.quantile(mu_samples, norm.cdf(-1.0), axis=1)
+        mu_sample_1sig_hi = np.quantile(mu_samples, norm.cdf(1.0), axis=1)
+
+        ax.fill_betweenx(
+            self.psr.t,
+            mu_sample_3sig_lo,
+            mu_sample_3sig_hi,
+            alpha=0.1,
+            facecolor=color,
+        )
+        ax.fill_betweenx(
+            self.psr.t,
+            mu_sample_2sig_lo,
+            mu_sample_2sig_hi,
+            alpha=0.25,
+            facecolor=color,
+        )
+        ax.fill_betweenx(
+            self.psr.t,
+            mu_sample_1sig_lo,
+            mu_sample_1sig_hi,
+            alpha=0.25,
+            facecolor=color,
+        )
+        # ax.set_xlim(-0.5, 0.5)
+        ax.set_xlabel("$\\delta t$")
+        ax.set_ylabel("Time (MJD)")
+
+        return mu_samples
 
     def plot_PB_shifts(self, ax, color="black", offset=0):
 
