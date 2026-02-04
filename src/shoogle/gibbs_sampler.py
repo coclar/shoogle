@@ -200,7 +200,7 @@ class Gibbs(object):
                 FC_free = False
                 GAM0 = None
                 GAM_free = False
-                KAPPA0 = -20.0
+                logKAPPA0 = -20.0
                 KAPPA_free = False
 
                 for line in lines:
@@ -216,7 +216,7 @@ class Gibbs(object):
                         GAM0 = float(line.split()[1])
                         GAM_free = int(line.split()[2])
                     if line.split()[0] == f"{prefix}_REDKAPPA":
-                        KAPPA0 = float(line.split()[1])
+                        logKAPPA0 = float(line.split()[1])
                         KAPPA_free = int(line.split()[2])
 
                 if logA0 is not None:
@@ -234,7 +234,7 @@ class Gibbs(object):
                                 [A_free, FC_free, GAM_free, KAPPA_free], dtype=bool
                             ),
                             self.Tobs,
-                            np.array([logA0, logFC0, GAM0, KAPPA0]),
+                            np.array([logA0, logFC0, GAM0, logKAPPA0]),
                             prefix,
                         )
                     )
@@ -261,6 +261,8 @@ class Gibbs(object):
                 A_free = False
                 FC_free = False
                 GAM_free = False
+                logKAPPA0 = -20.0
+                KAPPA_free = False
 
                 for line in lines:
                     if len(line.split()) < 2:
@@ -274,6 +276,9 @@ class Gibbs(object):
                     if line.split()[0] == f"{prefix}_REDGAM":
                         GAM0 = float(line.split()[1])
                         GAM_free = int(line.split()[2])
+                    if line.split()[0] == f"{prefix}_REDKAPPA":
+                        logKAPPA0 = float(line.split()[1])
+                        KAPPA_free = int(line.split()[2])
 
                 if logA0 is not None:
                     if not hasattr(self, "OPVfreqs"):
@@ -282,17 +287,20 @@ class Gibbs(object):
                         self.fit_OPV = True
 
                     self.noise_models.append(
-                        BrokenPowerLaw(
+                        FlatTailBrokenPowerLaw(
                             self.OPVfreqs,
                             self.OPVSinds,
                             self.OPVCinds,
-                            [A_free, FC_free, GAM_free],
+                            [A_free, FC_free, GAM_free, KAPPA_free],
                             self.Tobs,
-                            np.array([logA0, logFC0, GAM0]),
+                            np.array([logA0, logFC0, GAM0, logKAPPA0]),
                             prefix,
                         )
                     )
                     nc += 1
+
+                    if A_free == 2:
+                        self.noise_models[-1].linear_amp_prior = True
 
                 else:
                     break
@@ -897,6 +905,19 @@ class Gibbs(object):
         print(jax.devices())
 
         # template alignment check
+        logL_max = 0
+        for dphi in np.arange(-0.5,0.5,0.001):
+            tau = np.array(self.tau_sampler.tau_0)
+            tau[self.npeaks:2 * self.npeaks] += dphi
+            if self.Edep:
+                tau[4 * self.npeaks:5 * self.npeaks] += dphi
+            logL = self.tau_sampler._log_like(jnp.array(tau),jnp.array(self.phi))
+            if logL > logL_max:
+                logL_max = logL
+                print(dphi, logL)
+                tau_opt = jnp.array(tau)
+        self.tau_sampler.tau_0 = tau_opt
+
         fig, ax = plt.subplots(2, 1, sharex=True, height_ratios=[1, 2], figsize=(5, 10))
         i = np.argsort(self.w)
         p = np.arange(0, 1, 0.001)
@@ -994,20 +1015,22 @@ class Gibbs(object):
         if not hasattr(self.tau_sampler, "kernel"):
             print("Setting up template sampler")
             tau, key = self.tau_sampler.setup_sampler(jphi - phase_shifts)
+            print()
+
+        if key is None:
+            key = jax.random.key(0)
+        mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
+            tau, jphi - phase_shifts, key
+        )
 
         if self.nhyp > 0:
             self.timing_sampler.hyp_0 = jnp.array(hyp)
             if not hasattr(self.timing_sampler, "kernel"):
                 print("Setting up hyper-parameter sampler")
-                mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
-                    tau, jphi - phase_shifts, key
-                )
                 hyp, key = self.timing_sampler.setup_sampler(mu_z, sigma_z)
-
+                print()
         c = 0
 
-        if key is None:
-            key = jax.random.key(0)
         keys = jax.random.split(key, 10000)
 
         if self.nhyp > 0:
@@ -1059,12 +1082,16 @@ class Gibbs(object):
 
                 return (phase_shifts, tau), (tau, theta)
 
+        print("JIT-compiling the Gibbs sampler")
+        state, samples = gibbs_sampling_loop(state,key)
+
         progress = tqdm(
             total=n_acor_target * update, desc="Gibbs sampling", smoothing=0.0
         )
         start_time = time.time()
         progress.start_t = start_time
         progress.last_print_t = start_time
+
 
         while (c < update or n_acor < n_acor_target) and (c < max_iterations):
 
@@ -1100,8 +1127,13 @@ class Gibbs(object):
             if self.nhyp > 0:
                 hyp = samples[1]
                 theta = samples[2]
+                if np.any(np.isnan(hyp))
+                    raise ValueError("Error: found a NaN in the samples")
             else:
                 theta = samples[1]
+
+            if np.any(np.isnan(theta)) or np.any(np.isnan(tau)):
+                raise ValueError("Error: found a NaN in the samples")
 
             self.timing_chain[c] = theta[: self.n_timing_pars]
             self.template_chain[c] = tau

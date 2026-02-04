@@ -360,7 +360,7 @@ class TemplateSampler(object):
         self.kernel = kernel
         tau, logprior = self._samples_to_phys(state.position)
 
-        return np.array(tau), sample_key
+        return tau, sample_key
 
     def sample(self, tau, phases, key, num_samples=1000):
         """
@@ -979,8 +979,11 @@ class TimingModelSampler(object):
         resids = self.phi - mu_z
         precisions = jnp.where(sigma_z > 0, 1.0 / sigma_z**2, 0.0)
 
-        MT_Sigma_inv_M = jnp.einsum("ji,j,jk->ik", self.M, precisions, self.M)
-        MT_Sigma_inv_R = jnp.einsum("ji,j,j->i", self.M, precisions, resids)
+        MT_Sigma_inv_M = self.M.T @ (precisions[:,None] * self.M)
+        MT_Sigma_inv_R = self.M.T @ (precisions * resids)
+
+        # Enforce symmetry
+        MT_Sigma_inv_M = 0.5 * (MT_Sigma_inv_M + MT_Sigma_inv_M.T)
 
         return MT_Sigma_inv_M, MT_Sigma_inv_R
 
@@ -1210,7 +1213,6 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
             if "OPV" in self.noise_models[c].prefix:
                 scales[c] = 1.0 / PB0.to_value("s") ** 2
-                print(scales)
 
             num_pars = len(self.noise_models[c].free)
             hyp0[c, :num_pars] = self.noise_models[c].x0
