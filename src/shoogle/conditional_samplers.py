@@ -20,20 +20,33 @@ def read_template(proffile, extra_phase=None):
         with open(proffile, "rb") as input_file:
             template = pickle.load(input_file)
             input_file.close()
+
+        amps = np.array([A for A in template.norms()])
+        mus = np.mod(np.array([p.get_location() for p in template.primitives]), 1.0)
+        sigmas = np.array([p.get_width() for p in template.primitives])
+
     else:
-        primitives, norms = prim_io(proffile)
-        template = LCTemplate(primitives, norms)
+        amps = []
+        mus = []
+        sigmas = []
+
+        with open(proffile, "r") as input_file:
+            lines = input_file.readlines()
+
+        for line in lines:
+            if line.split()[0][:4] == "ampl":
+                amps.append(float(line.split()[2]))
+            elif line.split()[0][:4] == "phas":
+                mus.append(float(line.split()[2]))
+            elif line.split()[0][:4] == "fwhm":
+                sigmas.append(float(line.split()[2]) / (2 * np.sqrt(2 * np.log(2))))
+
+        amps = np.array(amps)
+        mus = np.array(mus)
+        sigmas = np.array(sigmas)
 
     if extra_phase:
-        for prim in template.primitives:
-            new_location = (prim.get_location() + extra_phase) % 1
-            prim.set_location(new_location)
-
-    amps = np.array([A for A in template.norms()])
-    mus = np.mod(
-        np.array([p.get_location() for p in template.primitives]), 1.0
-    )
-    sigmas = np.array([p.get_width() for p in template.primitives])
+        mus = np.mod(mus + extra_phase, 1.0)
 
     return amps, mus, sigmas
 
@@ -47,7 +60,15 @@ class TemplateSampler(object):
     NUTS sampler, which provides efficient MCMC sampling.
     """
 
-    def __init__(self, proffile, weights, minsigma=0.001, maxsigma=0.5, maxwraps=2, extra_phase=None):
+    def __init__(
+        self,
+        proffile,
+        weights,
+        minsigma=0.001,
+        maxsigma=0.5,
+        maxwraps=2,
+        extra_phase=None,
+    ):
         """
         Initialises the object, including reading a starting estimate for
         the profile parameters from a file.
@@ -69,7 +90,9 @@ class TemplateSampler(object):
                      Maximum number of phase wraps to sum over.
                      More wraps = more accurate, but slower.
         """
-        self.A_0, self.mu_0, self.sigma_0 = read_template(proffile, extra_phase=extra_phase)
+        self.A_0, self.mu_0, self.sigma_0 = read_template(
+            proffile, extra_phase=extra_phase
+        )
         self.A_0 *= 0.999  # This prevents nasty numerical issues...
 
         self.tau_0 = jnp.array(np.concatenate((self.A_0, self.mu_0, self.sigma_0)))
@@ -444,9 +467,7 @@ class EdepTemplateSampler(TemplateSampler):
     over log-energy between these two profiles.
     """
 
-    def __init__(
-        self, proffile, weights, log10E, minsigma=0.001, maxsigma=0.5, maxwraps=2
-    ):
+    def __init__(self, proffile, weights, log10E, **kwargs):
         """
         Initialises the object, including reading a starting estimate for
         the profile parameters from a file.
@@ -471,7 +492,7 @@ class EdepTemplateSampler(TemplateSampler):
                      More wraps = more accurate, but slower.
         """
 
-        super().__init__(proffile, weights, minsigma, maxsigma, maxwraps)
+        super().__init__(proffile, weights, **kwargs)
 
         self.tau_0 = jnp.concatenate((self.tau_0, self.tau_0))
         self.log10E = jnp.array(log10E)
@@ -979,7 +1000,7 @@ class TimingModelSampler(object):
         resids = self.phi - mu_z
         precisions = jnp.where(sigma_z > 0, 1.0 / sigma_z**2, 0.0)
 
-        MT_Sigma_inv_M = self.M.T @ (precisions[:,None] * self.M)
+        MT_Sigma_inv_M = self.M.T @ (precisions[:, None] * self.M)
         MT_Sigma_inv_R = self.M.T @ (precisions * resids)
 
         # Enforce symmetry

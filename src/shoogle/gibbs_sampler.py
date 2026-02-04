@@ -31,7 +31,7 @@ from shoogle.conditional_samplers import *
 
 import jax
 
-#jax.config.update("jax_enable_x64", True)
+# jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 
@@ -160,9 +160,13 @@ class Gibbs(object):
 
         self.Edep = Edep
         if self.Edep:
-            self.tau_sampler = EdepTemplateSampler(templatefile, self.w, self.log10E, extra_phase=extra_phase)
+            self.tau_sampler = EdepTemplateSampler(
+                templatefile, self.w, self.log10E, extra_phase=extra_phase
+            )
         else:
-            self.tau_sampler = TemplateSampler(templatefile, self.w, extra_phase=extra_phase)
+            self.tau_sampler = TemplateSampler(
+                templatefile, self.w, extra_phase=extra_phase
+            )
 
         self.npeaks = self.tau_sampler.npeaks
 
@@ -906,12 +910,12 @@ class Gibbs(object):
 
         # template alignment check
         logL_max = 0
-        for dphi in np.arange(-0.5,0.5,0.001):
+        for dphi in np.arange(-0.5, 0.5, 0.001):
             tau = np.array(self.tau_sampler.tau_0)
-            tau[self.npeaks:2 * self.npeaks] += dphi
+            tau[self.npeaks : 2 * self.npeaks] += dphi
             if self.Edep:
-                tau[4 * self.npeaks:5 * self.npeaks] += dphi
-            logL = self.tau_sampler._log_like(jnp.array(tau),jnp.array(self.phi))
+                tau[4 * self.npeaks : 5 * self.npeaks] += dphi
+            logL = self.tau_sampler._log_like(jnp.array(tau), jnp.array(self.phi))
             if logL > logL_max:
                 logL_max = logL
                 print(dphi, logL)
@@ -1083,7 +1087,7 @@ class Gibbs(object):
                 return (phase_shifts, tau), (tau, theta)
 
         print("JIT-compiling the Gibbs sampler")
-        state, samples = gibbs_sampling_loop(state,key)
+        state, samples = gibbs_sampling_loop(state, key)
 
         progress = tqdm(
             total=n_acor_target * update, desc="Gibbs sampling", smoothing=0.0
@@ -1091,7 +1095,6 @@ class Gibbs(object):
         start_time = time.time()
         progress.start_t = start_time
         progress.last_print_t = start_time
-
 
         while (c < update or n_acor < n_acor_target) and (c < max_iterations):
 
@@ -1127,7 +1130,7 @@ class Gibbs(object):
             if self.nhyp > 0:
                 hyp = samples[1]
                 theta = samples[2]
-                if np.any(np.isnan(hyp))
+                if np.any(np.isnan(hyp)):
                     raise ValueError("Error: found a NaN in the samples")
             else:
                 theta = samples[1]

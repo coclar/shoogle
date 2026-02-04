@@ -75,7 +75,7 @@ class NoiseModel(object):
 
         if self.nfree == self.npar:
             p = np.copy(x)
-         
+
         else:
             c = 0
             p = np.copy(self.x0)
@@ -272,7 +272,6 @@ class FlatTailBrokenPowerLaw(NoiseModel):
         if "OPV" in self.prefix:
             self.bounds[0] = [-15, -5]
             self.bounds[2] = [1.0, 9.0]
-
 
     """
     def cov(self, t, pars):
