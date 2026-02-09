@@ -64,6 +64,13 @@ def main(argv=None):
         default=None,
         help="Base filename for saving plots",
     )
+    parser.add_option(
+        "-E",
+        "--Edep",
+        action="store_true",
+        default=False,
+        help="Fit for energy-dependence in the template pulse profile",
+    )
 
     (options, args) = parser.parse_args(argv)
 
@@ -75,6 +82,7 @@ def main(argv=None):
         weightfield=options.weightfield,
         templatefile=options.template,
         wmin=options.weightcut,
+        Edep=options.Edep,
     )
 
     res = GibbsResults(psr)
@@ -89,6 +97,7 @@ def main(argv=None):
     if hasattr(res.psr, "radio_toas"):
         fig2, ax2 = plt.subplots(2, 2, sharex="col")
         res.plot_radio_resids(ax2)
+    plt.savefig(options.output + "_phases.pdf", bbox_inches="tight")
     plt.show()
 
     if options.output:
@@ -100,7 +109,12 @@ def main(argv=None):
         else:
             res.write_new_parfile(options.output + ".par")
 
-    if res.psr.fit_TN and res.psr.has_OPV:
+    if options.Edep:
+        fig, ax = res.plot_Edep_profiles()
+        plt.savefig(options.output + "_Edep_profiles.pdf", bbox_inches="tight")
+    plt.show()
+
+    if res.psr.fit_TN or res.psr.fit_OPV:
         fig1 = res.hyp_corner()
         if options.output:
             plt.savefig(options.output + "_hyperparameters.pdf", bbox_inches="tight")
@@ -116,7 +130,8 @@ def main(argv=None):
         plt.savefig(options.output + "_templateparameters.pdf", bbox_inches="tight")
     plt.show()
 
-    res.summary_plot()
-    if options.output:
-        plt.savefig(options.output + "_summary.pdf", bbox_inches="tight")
-    plt.show()
+    if res.psr.fit_TN or res.psr.fit_OPV:
+        res.summary_plot()
+        if options.output:
+            plt.savefig(options.output + "_summary.pdf", bbox_inches="tight")
+        plt.show()
