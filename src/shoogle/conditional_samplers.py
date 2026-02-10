@@ -468,6 +468,7 @@ class EdepTemplateSampler(TemplateSampler):
     """
 
     def __init__(self, proffile, weights, log10E, **kwargs):
+
         """
         Initialises the object, including reading a starting estimate for
         the profile parameters from a file.
