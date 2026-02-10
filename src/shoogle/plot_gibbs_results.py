@@ -522,12 +522,15 @@ class GibbsResults(object):
                     self.phys_timing_chain[:, i].max(),
                     1000,
                 )
+
+                prior_mean = self.psr.theta_prior[i] / parameter_scales[i]
+                prior_sigma = self.psr.timing_parameter_uncertainties[i]
                 ax[i, i].plot(
                     vec,
                     norm.pdf(
                         vec,
-                        loc=self.timing_parameter_values[i],
-                        scale=self.timing_parameter_uncertainties[i],
+                        loc=prior_mean,
+                        scale=prior_sigma,
                     ),
                     color="red",
                 )

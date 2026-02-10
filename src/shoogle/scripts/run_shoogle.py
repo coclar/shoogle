@@ -42,6 +42,13 @@ def main(argv=None):
         help="Pulsar ephemeris .par file",
     )
     parser.add_option(
+        "-P",
+        "--priorfile",
+        type="string",
+        default=None,
+        help="File defining timing model priors and noise hyperparameters",
+    )
+    parser.add_option(
         "-t", "--template", type="string", default=None, help="Template pulse profile"
     )
     parser.add_option(
@@ -99,7 +106,6 @@ def main(argv=None):
         print("Error: -o/--outputfile is a required argument", file=sys.stderr)
         sys.exit(1)
 
-
     if options.weightfield is None:
         weightfield = None
         f = fits.open(options.ft1)
@@ -119,7 +125,7 @@ def main(argv=None):
                     raise ValueError("Cannot unambiguously determine the weight column")
                 weightfield = w
     else:
-        weightfield = options.weightfield        
+        weightfield = options.weightfield
 
     G = Gibbs(
         parfile=options.parfile,
@@ -130,9 +136,9 @@ def main(argv=None):
         templatefile=options.template,
         wmin=options.weightcut,
         Edep=options.Edep,
+        priorfile=options.priorfile,
     )
 
-    
     G.sample(
         outputfile=options.outputfile,
         plots=(not options.quiet),
@@ -140,7 +146,6 @@ def main(argv=None):
         n_acor_target=options.nacor,
         update=options.update,
     )
-    
 
     if not options.quiet:
         res = GibbsResults(G)
@@ -154,7 +159,6 @@ def main(argv=None):
             res.write_orbifunc_parfile(options.outputfile + "_orbifunc.par")
         else:
             res.write_new_parfile(options.outputfile + ".par")
-
 
         endfile = ".png"
         if G.fit_TN:
@@ -180,4 +184,3 @@ def main(argv=None):
         plt.savefig(options.outputfile + "_summary" + endfile, bbox_inches="tight")
 
         plt.show()
-

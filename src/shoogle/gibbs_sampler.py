@@ -9,6 +9,7 @@ from tqdm.auto import tqdm
 import time
 
 from astropy import units as u
+from astropy.coordinates import Angle
 
 from scipy.stats import norm, multivariate_normal as mvn, Covariance, dirichlet
 from scipy.linalg import cholesky, cho_solve, solve
@@ -30,8 +31,6 @@ from shoogle.noise_models import BrokenPowerLaw, FlatTailBrokenPowerLaw
 from shoogle.conditional_samplers import *
 
 import jax
-
-# jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 
@@ -72,6 +71,7 @@ class Gibbs(object):
         wmin=0.05,
         timfile=None,
         Edep=False,
+        priorfile=None,
     ):
         """
 
@@ -177,8 +177,14 @@ class Gibbs(object):
         else:
             self.zm_sampler = LatentVariableSampler(self.w, self.npeaks)
 
+        if priorfile is not None:
+            with open(priorfile, "r") as pf:
+                prior_lines = pf.readlines()
+        else:
+            prior_lines = []
+
         print("Constructing design matrix")
-        self._make_design_matrix()
+        self._make_design_matrix(priorfile)
 
         self.noise_models = []
 
@@ -207,7 +213,7 @@ class Gibbs(object):
                 logKAPPA0 = -20.0
                 KAPPA_free = False
 
-                for line in lines:
+                for line in prior_lines:
                     if len(line.split()) < 2:
                         continue
                     if line.split()[0] == f"{prefix}_REDAMP":
@@ -268,7 +274,7 @@ class Gibbs(object):
                 logKAPPA0 = -20.0
                 KAPPA_free = False
 
-                for line in lines:
+                for line in prior_lines:
                     if len(line.split()) < 2:
                         continue
                     if line.split()[0] == f"{prefix}_REDAMP":
@@ -327,6 +333,7 @@ class Gibbs(object):
                 PB0 = self.PB0
             else:
                 PB0 = None
+
             self.timing_sampler = NoiseAndTimingModelSampler(
                 self.phi,
                 self.M,
@@ -617,7 +624,7 @@ class Gibbs(object):
         with np.errstate(divide="ignore"):
             self.logdet_prior = -np.sum(np.where(Kinv > 0, np.log(Kinv), 0.0))
 
-    def _make_design_matrix(self):
+    def _make_design_matrix(self, priorfile=None):
 
         M, names, units = self.timing_model.designmatrix(
             self.photon_toas, incoffset=True
@@ -653,17 +660,42 @@ class Gibbs(object):
 
         self.timing_parameter_values = np.zeros(self.n_timing_pars)
         self.timing_parameter_uncertainties = np.zeros(self.n_timing_pars)
+        self.theta_prior = np.zeros(self.n_timing_pars)
+
+        priors_dict = {}
+        if priorfile is not None:
+            with open(priorfile, "r") as pf:
+                prior_lines = pf.readlines()
+            for line in prior_lines:
+                words = line.split()
+                if len(words) < 4:
+                    continue
+
+                if int(words[2]):
+
+                    if words[0] == "RAJ":
+                        value = Angle(words[1], unit="hourangle").hourangle
+                        sigma = float(words[3]) / 3600.0
+                    elif words[0] == "DECJ":
+                        value = Angle(words[1], unit="deg").deg
+                        sigma = float(words[3]) / 3600.0
+                    else:
+                        value = float(words[1])
+                        sigma = float(words[3])
+
+                    priors_dict[words[0]] = {"value": value, "sigma": sigma}
 
         pint_pars = self.timing_model.get_params_dict()
         for i, name in enumerate(self.timing_parameter_names):
-            try:
-                # This fails for "Offset" parameters
-                par = pint_pars[name]
-                self.timing_parameter_values[i] = par.value
-                self.timing_parameter_uncertainties[i] = par.uncertainty.value
-            except:
-                self.timing_parameter_values[i] = 0.0
-                self.timing_parameter_uncertainties[i] = 0.0
+            if name == "Offset":
+                continue
+
+            par = pint_pars[name]
+
+            self.timing_parameter_values[i] = par.value
+            if name in priors_dict:
+                self.theta_prior[i] = priors_dict[name]["value"] - par.value
+                self.timing_parameter_uncertainties[i] = priors_dict[name]["sigma"]
 
         if self.has_OPV:
             dd_dTASC = self.timing_model.get_deriv_funcs("DelayComponent")["TASC"][0]
@@ -732,13 +764,13 @@ class Gibbs(object):
             self.parameter_scales = np.max(np.abs(self.M), axis=0)
 
         if self.has_OPV:
-            self.theta_prior = np.concatenate((np.zeros(self.n_timing_pars), -orbwaves))
+            # Explicitly set ORBWAVE priors to be centered on zero
+            self.theta_prior = np.concatenate((self.theta_prior, -orbwaves))
             self.timing_parameter_uncertainties = np.concatenate(
                 (self.timing_parameter_uncertainties, np.zeros(len(orbwaves)))
             )
-        else:
-            self.theta_prior = np.zeros(self.n_timing_pars)
 
+        # Explicitly set WX priors to be centered on zero
         for i, par in enumerate(self.timing_parameter_names):
             if par[:2] == "WX":
                 self.theta_prior[i] = -self.timing_parameter_values[i]
@@ -1060,7 +1092,7 @@ class Gibbs(object):
                 )
                 logL = self.tau_sampler._log_like(tau, jphi - phase_shifts)
 
-                return (phase_shifts, tau, hyp), (tau, hyp, theta)
+                return (phase_shifts, tau, hyp), (tau, hyp, theta, logL)
 
         else:
             state = (phase_shifts, tau)
