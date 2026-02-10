@@ -121,6 +121,6 @@ WXCOS_0009                            0.0 1
 WXFREQ_0010          0.002156044604336869
 WXSIN_0010                            0.0 1
 WXCOS_0010                            0.0 1
-TN_REDAMP        -13                       1
+TN_REDAMP        -13                       2
 TN_REDFC         -1.95                     0
 TN_REDGAM        4.333333                  0

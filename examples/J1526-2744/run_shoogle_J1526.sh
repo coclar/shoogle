@@ -6,4 +6,4 @@ run_shoogle \
        -t J1526-2744_template.txt \
        -c 0.01 \
        -o J1526-2744_output \
-       -n 200 -u 100
+       -n 1000 -u 100 -q
