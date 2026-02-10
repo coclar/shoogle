@@ -1058,6 +1058,7 @@ class Gibbs(object):
                         hyp, mu_z, sigma_z, key
                     )
                 )
+                logL = self.tau_sampler._log_like(tau, jphi - phase_shifts)
 
                 return (phase_shifts, tau, hyp), (tau, hyp, theta)
 
@@ -1083,8 +1084,9 @@ class Gibbs(object):
                         mu_z, sigma_z, inv_prior_cov, key
                     )
                 )
+                logL = self.tau_sampler._log_like(tau, jphi - phase_shifts)
 
-                return (phase_shifts, tau), (tau, theta)
+                return (phase_shifts, tau), (tau, theta, logL)
 
         print("JIT-compiling the Gibbs sampler")
         state, samples = gibbs_sampling_loop(state, key)
@@ -1138,8 +1140,11 @@ class Gibbs(object):
             if np.any(np.isnan(theta)) or np.any(np.isnan(tau)):
                 raise ValueError("Error: found a NaN in the samples")
 
+            logL = samples[-1]
+
             self.timing_chain[c] = theta[: self.n_timing_pars]
             self.template_chain[c] = tau
+            self.loglike_chain[c] = logL
 
             if self.has_OPV:
                 self.opv_amps_chain[c] = theta[self.n_timing_pars :]  # -self.npeaks]
