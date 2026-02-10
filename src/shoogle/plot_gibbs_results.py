@@ -737,27 +737,39 @@ class GibbsResults(object):
                 aspect=40,
             )
 
-        theta_base = np.concatenate((self.timing_MAP, np.zeros_like(self.opv_amps_MAP)))
+        theta_MAP = np.concatenate((self.timing_MAP, self.opv_amps_MAP))
 
-        theta_prior = np.copy(self.psr.theta_prior)
-        if "FB1" in self.parameter_names:
-            fb1_idx = np.where(self.parameter_names == "FB1")[0][0]
-            theta_prior[fb1_idx] = (
-                -self.psr.timing_parameter_values[fb1_idx]
-                * self.psr.parameter_scales[fb1_idx]
-            )
+        TASCidx = np.where(self.parameter_names == "TASC")[0]
+        try:
+            FB0idx = np.where(self.parameter_names == "FB0")[0]
+        except:
+            FB0idx = np.where(self.parameter_names == "PB")[0]
+        FB1idx = np.where(self.parameter_names == "FB1")[0]
 
-        mu_orb_base = self.psr.Mo @ theta_base
+        idxs = np.concatenate(
+            (TASCidx, FB0idx, FB1idx, self.psr.OPVCinds, self.psr.OPVSinds)
+        )
 
-        mu_orbs = np.zeros((len(self.psr.t), 1000))
+        mu_orb_MAP = self.psr.Mo[:, TASCidx] @ theta_MAP[TASCidx]
+        mu_orb_MAP += self.psr.Mo[:, FB0idx] @ theta_MAP[FB0idx]
+        # mu_orb_MAP += self.psr.Mo[:,FB1idx] @ theta_MAP[FB1idx]
+        mu_orb_MAP += (
+            self.psr.Mo[:, self.psr.OPVCinds] @ self.psr.theta_prior[self.psr.OPVCinds]
+        )
+        mu_orb_MAP += (
+            self.psr.Mo[:, self.psr.OPVSinds] @ self.psr.theta_prior[self.psr.OPVSinds]
+        )
+
+        mu_orbs = np.zeros((len(self.psr.phi), 1000))
 
         for c, i in enumerate(
             np.random.choice(
                 np.arange(np.shape(self.timing_chain)[0]), replace=True, size=1000
             )
         ):
-            theta = np.concatenate((self.timing_chain[i], self.opv_amps_chain[i]))
-            mu_orbs[:, c] = self.psr.Mo @ (theta - theta_prior) - mu_orb_base
+
+            theta = np.concatenate((self.timing_chain[i], self.opv_amps_chain[i]))[idxs]
+            mu_orbs[:, c] = self.psr.Mo[:, idxs] @ theta - mu_orb_MAP
 
         mu_orbs = np.sort(mu_orbs, axis=1)
         mu_orbs -= np.mean(mu_orbs)
@@ -1332,7 +1344,7 @@ class GibbsResults(object):
             if self.psr.has_OPV:
                 theta = np.append(theta, self.opv_amps_chain[s])
             phase_shifts = self.psr.M @ theta
-            phases = self.psr.phi + phase_shifts - np.mean(phase_shifts)
+            phases = self.psr.phi - phase_shifts  # - np.mean(phase_shifts)
 
             phi = np.arange(-0.005, 0.005, 0.00001)
 
@@ -1344,20 +1356,29 @@ class GibbsResults(object):
                 if self.psr.Edep:
                     logL[idx] = np.sum(
                         np.log(
-                            self.psr.w * self.psr.tau_sampler.template(self.template_chain[s,:],shifted_phases,self.psr.log10E)
+                            self.psr.w
+                            * self.psr.tau_sampler.template(
+                                self.template_chain[s, :],
+                                shifted_phases,
+                                self.psr.log10E,
+                            )
                             + (1 - self.psr.w)
                         )
                     )
                 else:
                     logL[idx] = np.sum(
                         np.log(
-                            self.psr.w * self.psr.tau_sampler.template(self.template_chain[s,:],shifted_phases)
+                            self.psr.w
+                            * self.psr.tau_sampler.template(
+                                self.template_chain[s, :], shifted_phases
+                            )
                             + (1 - self.psr.w)
                         )
                     )
 
                 if idx % 10 == 0:
-                    print(idx, "/", len(phi), end = "\r")
+                    print(idx, "/", len(phi), end="\r")
+
             pdf = np.exp(logL - logL.max())
             pdf /= np.trapezoid(pdf, phi)
             dphi_sq = (
@@ -1389,43 +1410,49 @@ class GibbsResults(object):
                 np.append(self.timing_chain[s], self.opv_amps_chain[s])
             )
 
-            phases = self.psr.phi + phase_shifts - np.mean(phase_shifts)
-
-            gaussians = []
-            for p in range(self.psr.npeaks):
-                gaussians.append(
-                    LCGaussian(
-                        p=[
-                            self.template_chain[s, 2 * self.psr.npeaks + p],
-                            np.mod(self.template_chain[s, self.psr.npeaks + p], 1.0),
-                        ]
-                    )
-                )
-
-            template = LCTemplate(
-                gaussians, norms=self.template_chain[s, : self.psr.npeaks]
-            )
+            phases = self.psr.phi - phase_shifts
 
             TASC_ind = np.where(self.parameter_names == "TASC")[0][0]
             dTASC = np.arange(-1.0, 1.0, 0.01) / 86400.0
 
-            shifted_phases = np.mod(
-                phases[:, None]
-                + (
-                    self.psr.M[:, TASC_ind, None]
-                    * dTASC[None, :]
-                    * self.parameter_scales[TASC_ind]
-                ),
-                1.0,
-            )
+            logL = np.zeros_like(dTASC)
 
-            logL = np.sum(
-                np.log(
-                    self.psr.w[:, None] * template(shifted_phases)
-                    + (1 - self.psr.w[:, None])
-                ),
-                axis=0,
-            )
+            for idx in range(len(dTASC)):
+                shifted_phases = np.mod(
+                    phases
+                    + (
+                        self.psr.M[:, TASC_ind]
+                        * dTASC[idx]
+                        * self.parameter_scales[TASC_ind]
+                    ),
+                    1.0,
+                )
+
+                if self.psr.Edep:
+                    logL[idx] = np.sum(
+                        np.log(
+                            self.psr.w
+                            * self.psr.tau_sampler.template(
+                                self.template_chain[s, :],
+                                shifted_phases,
+                                self.psr.log10E,
+                            )
+                            + (1 - self.psr.w)
+                        )
+                    )
+                else:
+                    logL[idx] = np.sum(
+                        np.log(
+                            self.psr.w
+                            * self.psr.tau_sampler.template(
+                                self.template_chain[s, :], shifted_phases
+                            )
+                            + (1 - self.psr.w)
+                        )
+                    )
+
+                if idx % 10 == 0:
+                    print(idx, "/", len(dTASC), end="\r")
 
             pdf = np.exp(logL - logL.max())
             pdf /= np.trapezoid(pdf, dTASC)
@@ -1452,7 +1479,6 @@ class GibbsResults(object):
         for component in self.psr.noise_models:
             if component.prefix[: len(kind)] == kind:
                 nc += 1
-
 
         component_psds = np.zeros((len(f), nit, nc))
 
