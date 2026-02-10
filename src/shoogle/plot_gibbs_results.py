@@ -523,7 +523,10 @@ class GibbsResults(object):
                     1000,
                 )
 
-                prior_mean = self.psr.theta_prior[i] / parameter_scales[i]
+                prior_mean = (
+                    self.psr.theta_prior[i] / self.parameter_scales[i]
+                    + self.psr.timing_parameter_values[i]
+                )
                 prior_sigma = self.psr.timing_parameter_uncertainties[i]
                 ax[i, i].plot(
                     vec,
