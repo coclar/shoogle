@@ -671,6 +671,9 @@ class Gibbs(object):
                 if len(words) < 4:
                     continue
 
+                if line.split()[0][0] == "#":
+                    continue
+
                 if int(words[2]):
 
                     if words[0] == "RAJ":
@@ -937,9 +940,6 @@ class Gibbs(object):
 
         """
 
-        # check on GPUs
-        print(jax.devices())
-
         # template alignment check
         logL_max = 0
         for dphi in np.arange(-0.5, 0.5, 0.001):
@@ -950,8 +950,8 @@ class Gibbs(object):
             logL = self.tau_sampler._log_like(jnp.array(tau), jnp.array(self.phi))
             if logL > logL_max:
                 logL_max = logL
-                print(dphi, logL)
                 tau_opt = jnp.array(tau)
+
         self.tau_sampler.tau_0 = tau_opt
 
         fig, ax = plt.subplots(2, 1, sharex=True, height_ratios=[1, 2], figsize=(5, 10))
@@ -1047,19 +1047,57 @@ class Gibbs(object):
             plt.ion()
             fig, ax = plt.subplots(1, 3, figsize=(15, 5))
 
+        if key is None:
+            key = jax.random.key(0)
+
+        if self.nhyp > 0:
+            all_hyp = self.timing_sampler._fill_noise_pars(hyp)
+            inv_prior_cov, _ = self.timing_sampler._make_psd_cov(all_hyp)
+        else:
+            inv_prior_cov = jnp.array(self.inv_prior_cov)
+
         jphi = jnp.array(self.phi)
+
+        @jax.jit
+        def warmup_loop(phase_shifts, tau, key):
+
+            mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
+                tau, jphi - phase_shifts, key
+            )
+
+            theta, phase_shifts, key = (
+                self.timing_sampler.sample_theta_given_lambda_tau_zm(
+                    mu_z, sigma_z, inv_prior_cov, key
+                )
+            )
+            logL = self.tau_sampler._log_like(tau, jphi - phase_shifts)
+
+            return phase_shifts, logL, key
+
+        print("Optimising timing model with fixed template")
+        for it in range(100):
+            phase_shifts, logL, key = warmup_loop(phase_shifts, tau, key)
+            if it == 0:
+                logL0 = logL
+        print(f"logL : {logL0:.2f} -> {logL:.2f}")
+
         if not hasattr(self.tau_sampler, "kernel"):
             print("Setting up template sampler")
             tau, key = self.tau_sampler.setup_sampler(jphi - phase_shifts)
             print()
 
-        if key is None:
-            key = jax.random.key(0)
-        mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
-            tau, jphi - phase_shifts, key
-        )
-
         if self.nhyp > 0:
+            print("Re-optimising timing model with burnt-in template")
+            for it in range(100):
+                phase_shifts, logL, key = warmup_loop(phase_shifts, tau, key)
+                if it == 0:
+                    logL0 = logL
+            print(f"logL : {logL0:.2f} -> {logL:.2f}")
+
+            mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
+                tau, jphi - phase_shifts, key
+            )
+
             self.timing_sampler.hyp_0 = jnp.array(hyp)
             if not hasattr(self.timing_sampler, "kernel"):
                 print("Setting up hyper-parameter sampler")
