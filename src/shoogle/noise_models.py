@@ -210,7 +210,7 @@ class BrokenPowerLaw(NoiseModel):
     def log_prior(self, pars):
 
         if self.linear_amp_prior:
-            return pars[0]
+            return pars[0] * np.log(10)
 
         return 0.0
 
@@ -294,7 +294,7 @@ class FlatTailBrokenPowerLaw(NoiseModel):
     def log_prior(self, pars):
 
         if self.linear_amp_prior:
-            return pars[0]
+            return pars[0] * np.log(10)
 
         return 0.0
 

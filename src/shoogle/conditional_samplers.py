@@ -1316,7 +1316,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         amp_prior = 0.0
         for c in range(len(x)):
             amp_prior += jax.lax.cond(
-                self.linear_priors[c], lambda: hyp[c], lambda: 0.0
+                self.linear_priors[c], lambda: hyp[c] * np.log(10), lambda: 0.0
             )
 
         return hyp, logprior + amp_prior
