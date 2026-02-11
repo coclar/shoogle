@@ -1,8 +1,11 @@
+# Gaia astrometry
 RAJ      19:59:36.7423291438     1     4.24e-05
 DECJ    +20:48:14.4714481783     1     0.000635
 PMRA                -19.2671     1     1.2353
 PMDEC               -26.5600     1     1.2441
 PX                    1.1878     1     1.3556
+
+# Noise model hyperparameters
 OPV_REDAMP       -7.5                      1
 OPV_REDFC        -1.0                      1
 OPV_REDGAM       4.0                       1
