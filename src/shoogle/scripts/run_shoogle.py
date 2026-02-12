@@ -147,40 +147,38 @@ def main(argv=None):
         update=options.update,
     )
 
+    res = GibbsResults(G)
+    res.load_results(load_from=[options.outputfile + ".npz"], decimated=True)
+    res.MAP_phases()
+
+    res.write_tvsph(options.outputfile + "_MAP.tvsph", res.phi_MAP)
+    res.write_new_template(options.outputfile + "_prof.dat")
+    if res.psr.has_OPV:
+        res.write_new_parfile(options.outputfile + "_orbwaves.par")
+        res.write_orbifunc_parfile(options.outputfile + "_orbifunc.par")
+    else:
+        res.write_new_parfile(options.outputfile + ".par")
+
+    endfile = ".png"
+    if G.fit_TN:
+        fig1 = res.hyp_corner()
+        plt.savefig(
+            options.outputfile + "_hyperparameters" + endfile, bbox_inches="tight"
+        )
+
+    if res.psr.has_TN:
+        fig2 = res.timing_corner(nWX=G.nWXfreqs)
+    else:
+        fig2 = res.timing_corner(plot_wxcomp=True)
+    plt.savefig(options.outputfile + "_timingparameters" + endfile, bbox_inches="tight")
+
+    fig3 = res.template_corner()
+    plt.savefig(
+        options.outputfile + "_templateparameters" + endfile, bbox_inches="tight"
+    )
+
+    fig4 = res.summary_plot()
+    plt.savefig(options.outputfile + "_summary" + endfile, bbox_inches="tight")
+
     if not options.quiet:
-        res = GibbsResults(G)
-        res.load_results(load_from=[options.outputfile + ".npz"], decimated=True)
-        res.MAP_phases()
-
-        res.write_tvsph(options.outputfile + "_MAP.tvsph", res.phi_MAP)
-        res.write_new_template(options.outputfile + "_prof.dat")
-        if res.psr.has_OPV:
-            res.write_new_parfile(options.outputfile + "_orbwaves.par")
-            res.write_orbifunc_parfile(options.outputfile + "_orbifunc.par")
-        else:
-            res.write_new_parfile(options.outputfile + ".par")
-
-        endfile = ".png"
-        if G.fit_TN:
-            fig1 = res.hyp_corner()
-            plt.savefig(
-                options.outputfile + "_hyperparameters" + endfile, bbox_inches="tight"
-            )
-
-        if res.psr.has_TN:
-            fig2 = res.timing_corner(nWX=G.nWXfreqs)
-        else:
-            fig2 = res.timing_corner(plot_wxcomp=True)
-        plt.savefig(
-            options.outputfile + "_timingparameters" + endfile, bbox_inches="tight"
-        )
-
-        fig3 = res.template_corner()
-        plt.savefig(
-            options.outputfile + "_templateparameters" + endfile, bbox_inches="tight"
-        )
-
-        fig4 = res.summary_plot()
-        plt.savefig(options.outputfile + "_summary" + endfile, bbox_inches="tight")
-
         plt.show()
