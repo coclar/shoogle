@@ -468,7 +468,6 @@ class EdepTemplateSampler(TemplateSampler):
     """
 
     def __init__(self, proffile, weights, log10E, **kwargs):
-
         """
         Initialises the object, including reading a starting estimate for
         the profile parameters from a file.
@@ -921,10 +920,18 @@ class LatentVariableSampler(object):
 
         z_key, m_key, next_key = jax.random.split(key, 3)
 
-        zr = jax.random.uniform(z_key, (len(phases),))
-        mr = jax.random.uniform(m_key, (len(phases),))
+        # Photon->peak/wrap assignments are done by inverse CDF sampling.
+        # We compute the CDF, generate a random number, and check how many bins are below that number
 
-        z = jnp.sum(C < zr[:, None], axis=1)
+        # We need to clip the limits to be not exactly 0 or 1.
+        # If r = 1, and the wrap likelihood looks like [0,0,1,0,0],
+        # then the CDF looks like [0,0,1,1,1], so sum(C <= r) = 5
+        # and the photon would be assigned to index 5, which doesn't exist!
+        eps = jnp.finfo(jnp.float32).eps
+        zr = jax.random.uniform(z_key, (len(phases),), minval=eps, maxval=1 - eps)
+        mr = jax.random.uniform(m_key, (len(phases),), minval=eps, maxval=1 - eps)
+
+        z = jnp.sum(C <= zr[:, None], axis=1)
 
         mu_z = jnp.zeros(len(phases))
         sigma_z = jnp.zeros(len(phases))
@@ -933,12 +940,12 @@ class LatentVariableSampler(object):
 
             log_rho_wraps = log_like[:, k]
 
-            rho_wraps = jnp.exp(log_rho_wraps)
+            rho_wraps = jnp.exp(log_rho_wraps - jnp.max(log_rho_wraps, axis=1)[:, None])
             rho_wraps /= jnp.sum(rho_wraps, axis=1)[:, None]
 
             C_wraps = jnp.cumsum(rho_wraps, axis=1)
 
-            m = jnp.sum(C_wraps < mr[:, None], axis=1)
+            m = jnp.sum(C_wraps <= mr[:, None], axis=1)
 
             if len(tau) // 3 == 2 * self.npeaks:
                 mu_z = jnp.where(mask, mu[:, k] + self.wraps[m], mu_z)
@@ -1037,12 +1044,20 @@ class TimingModelSampler(object):
                          Upper-triangular Cholesky decomposition, U where C = U^T U
                          for the posterior covariance matrix C
         """
+
+        Kinv = jnp.diag(inv_prior_cov)
+        RHS = MT_Sigma_inv_R + Kinv * self.theta_prior
+
+        # Clip the lowest entries in the inverse prior to avoid
+        # numerical issues with Cholesky decomposition
+        Kinv = jnp.maximum(Kinv, jnp.min(jnp.diag(MT_Sigma_inv_M)) * 1e-4)
+        inv_prior_cov = jnp.diag(Kinv)
+
         post_cov_inv = MT_Sigma_inv_M + inv_prior_cov
+
         post_cov_inv_U = cholesky(post_cov_inv, lower=False)
 
-        theta_opt = cho_solve(
-            (post_cov_inv_U, False), MT_Sigma_inv_R + inv_prior_cov @ self.theta_prior
-        )
+        theta_opt = cho_solve((post_cov_inv_U, False), RHS)
 
         return theta_opt, post_cov_inv_U
 
@@ -1209,7 +1224,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         self.theta_prior = jnp.array(theta_prior)
         self.parameter_scales = parameter_scales
 
-        self.K0 = jnp.array(timing_prior_uncertainties**2)
+        self.K0 = jnp.array((timing_prior_uncertainties * parameter_scales) ** 2)
         self.noise_models = noise_models
 
         freqs = np.zeros((len(noise_models), len(parameter_scales)))
@@ -1380,10 +1395,9 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
                 * self.scales[c]
             )
 
-            K += powspec
+            K += powspec * self.parameter_scales**2
 
         Kinv = jnp.where(K > 0, 1.0 / K, 0.0)
-        Kinv /= self.parameter_scales**2
 
         logdet_prior = -jnp.sum(jnp.where(Kinv > 0, jnp.log(Kinv), 0.0))
 
