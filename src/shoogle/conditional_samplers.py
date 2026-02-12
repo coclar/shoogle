@@ -1,6 +1,6 @@
 import numpy as np
 import jax
-from jax.scipy.linalg import cholesky, cho_solve, solve
+from jax.scipy.linalg import cholesky, cho_solve, solve_triangular
 import jax.numpy as jnp
 import blackjax
 from scipy.special import logit, expit
@@ -10,7 +10,7 @@ import pickle
 from pint.templates.lctemplate import LCTemplate, prim_io
 
 ONE_OVER_SQRT2PI = 1.0 / (jnp.sqrt(2 * jnp.pi))
-YR3_TO_S2D = (1.0 * u.yr**3).to_value("s ** 2 * d")
+LOG10YR3_TO_S2D = jnp.log10((1.0 * u.yr**3).to_value("s ** 2 * d"))
 INVYR_TO_INVDAY = (1.0 / u.yr).to_value("1/d")
 
 
@@ -1040,26 +1040,39 @@ class TimingModelSampler(object):
         theta_opt      : Array, size (npars,)
                          Posterior mean for timing model parameters
 
-        post_cov_inv_U : Array, size (npars,npars)
-                         Upper-triangular Cholesky decomposition, U where C = U^T U
-                         for the posterior covariance matrix C
+        V              : Array, size (npars,npars)
+                         Upper-triangular Cholesky decomposition, V where G = V^T V
+                         where D G D = Cinv, the inverse of the posterior covariance matrix C
+                         U = VD is the Cholesky decomposition of Cinv
+
+        Dinv           : Array, size (npars)
+                         The inverse of the square-root of the diagonal of the posterior covariance matrix
+                         Used to scale/rescale the matrix for numerical stability.
+
+        logdet_prior   : float
+                         Log of the determinant of the prior covariance matrix
+
+        prior_chi2     : float
+                         chi-squared term for the prior timing model mean
         """
 
         Kinv = jnp.diag(inv_prior_cov)
-        RHS = MT_Sigma_inv_R + Kinv * self.theta_prior
+        logdet_prior = -jnp.sum(jnp.where(Kinv > 0, jnp.log(Kinv), 0.0))
+        prior_chi2 = jnp.sum(Kinv * self.theta_prior**2)
 
-        # Clip the lowest entries in the inverse prior to avoid
-        # numerical issues with Cholesky decomposition
-        Kinv = jnp.maximum(Kinv, jnp.min(jnp.diag(MT_Sigma_inv_M)) * 1e-4)
-        inv_prior_cov = jnp.diag(Kinv)
+        RHS = MT_Sigma_inv_R + Kinv * self.theta_prior
 
         post_cov_inv = MT_Sigma_inv_M + inv_prior_cov
 
-        post_cov_inv_U = cholesky(post_cov_inv, lower=False)
+        # Divide out the diagonal to make Cholesky decomposition more stable
+        Dinv = 1.0 / jnp.sqrt(jnp.diag(post_cov_inv))
+        G = Dinv[:, None] * post_cov_inv * Dinv[None, :]
 
-        theta_opt = cho_solve((post_cov_inv_U, False), RHS)
+        V = cholesky(G, lower=False)
 
-        return theta_opt, post_cov_inv_U
+        theta_opt = Dinv * cho_solve((V, False), Dinv * RHS)
+
+        return theta_opt, V, Dinv, logdet_prior, prior_chi2
 
     def sample_theta_given_lambda_tau_zm(self, mu_z, sigma_z, inv_prior_cov, key):
         """
@@ -1091,13 +1104,13 @@ class TimingModelSampler(object):
         key            : JAX PRNG key
         """
         MT_Sigma_inv_M, MT_Sigma_inv_R = self.setup_leastsq_given_z_tau(mu_z, sigma_z)
-        theta_opt, post_cov_inv_U = self.solve_leastsq(
+        theta_opt, V, Dinv, _, _ = self.solve_leastsq(
             MT_Sigma_inv_M, MT_Sigma_inv_R, inv_prior_cov
         )
 
         theta_key, key = jax.random.split(key)
         p = jax.random.normal(theta_key, (len(MT_Sigma_inv_R),))
-        theta = theta_opt + solve(post_cov_inv_U, p)
+        theta = theta_opt + Dinv * solve_triangular(V, p, lower=False)
         phase_shifts = self.M @ theta
         phase_shifts -= jnp.mean(phase_shifts)
 
@@ -1132,15 +1145,14 @@ def bpl_powspec(pars, freqs):
     logfc = pars[1]
     gamma = pars[2]
 
-    A = 10**logA
+    Asquared = 10 ** (2 * logA + LOG10YR3_TO_S2D)
     fc = 10**logfc
 
-    # In units of yr ** 3
-    norm = A**2 / (12 * jnp.pi**2) * (fc ** (-gamma))
+    norm = Asquared / (12 * jnp.pi**2) * (fc ** (-gamma))
 
     psd = norm * (1 + (freqs / fc) ** 2) ** (-gamma / 2)
 
-    return psd * YR3_TO_S2D
+    return psd
 
 
 def bpl_flattail_powspec(pars, freqs):
@@ -1172,7 +1184,7 @@ def bpl_flattail_powspec(pars, freqs):
     bpl = bpl_powspec(pars, freqs)
     logkappa = pars[3]
 
-    flat = 10 ** (2 * logkappa) * YR3_TO_S2D
+    flat = 10 ** (2 * logkappa + LOG10YR3_TO_S2D)
     psd = jnp.maximum(bpl, flat)
 
     return psd
@@ -1399,9 +1411,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
         Kinv = jnp.where(K > 0, 1.0 / K, 0.0)
 
-        logdet_prior = -jnp.sum(jnp.where(Kinv > 0, jnp.log(Kinv), 0.0))
-
-        return jnp.diag(Kinv), logdet_prior
+        return jnp.diag(Kinv)
 
     def log_post(self, x, MT_Sigma_inv_M, MT_Sigma_inv_R):
         """
@@ -1428,15 +1438,14 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         hyp, logprior = self._samples_to_phys(x)
         all_hyp = self._fill_noise_pars(hyp)
 
-        inv_prior_cov, logdet_prior = self._make_psd_cov(all_hyp)
+        inv_prior_cov = self._make_psd_cov(all_hyp)
 
-        theta_opt, post_cov_inv_U = self.solve_leastsq(
+        theta_opt, V, Dinv, logdet_prior, prior_chi2 = self.solve_leastsq(
             MT_Sigma_inv_M, MT_Sigma_inv_R, inv_prior_cov
         )
 
-        prior_chi2 = self.theta_prior @ (inv_prior_cov @ self.theta_prior)
-        post_chi2 = jnp.sum((post_cov_inv_U @ theta_opt) ** 2)
-        logdet_post = -2 * jnp.sum(jnp.log(jnp.diag(post_cov_inv_U)))
+        post_chi2 = jnp.sum((V @ (theta_opt / Dinv)) ** 2)
+        logdet_post = -2 * jnp.sum(jnp.log(jnp.diag(V))) + 2 * jnp.sum(jnp.log(Dinv))
         logpost = logprior - 0.5 * (logdet_prior + prior_chi2 - logdet_post - post_chi2)
 
         return logpost
@@ -1588,7 +1597,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
         new_hyp = hyp_samples[0][-1]
         all_hyp = self._fill_noise_pars(new_hyp)
-        inv_prior_cov, logdet_prior = self._make_psd_cov(all_hyp)
+        inv_prior_cov = self._make_psd_cov(all_hyp)
 
         theta, phase_shifts, key = self.sample_theta_given_lambda_tau_zm(
             mu_z, sigma_z, inv_prior_cov, key
