@@ -1066,7 +1066,7 @@ class TimingModelSampler(object):
 
         # Divide out the diagonal to make Cholesky decomposition more stable
         Dinv = 1.0 / jnp.sqrt(jnp.diag(post_cov_inv))
-        G = Dinv[:, None] * post_cov_inv * Dinv[None, :]
+        G = Dinv[:, None] * post_cov_inv * Dinv[None, :] + jnp.eye(len(Dinv)) * 1e-6
 
         V = cholesky(G, lower=False)
 
