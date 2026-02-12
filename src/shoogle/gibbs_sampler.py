@@ -881,12 +881,13 @@ class Gibbs(object):
 
     def sample(
         self,
-        n_acor_target=100,
-        update=100,
+        n_acor_target=1000,
+        update=1000,
         max_iterations=1000000,
         plots=False,
         outputfile="chains",
         resume=False,
+        num_NUTS_steps=1,
     ):
         """
         Runs the Gibbs sampling loop.
@@ -911,14 +912,14 @@ class Gibbs(object):
         Parameters
         ----------
 
-        ntau_target : int, default=100
-                      Number of autocorrelation times to run for.
-                      This determines the effective sample size of the chains.
-                      Higher number = more robust results, but slower.
+        n_acor_target : int, default=1000
+                       Number of autocorrelation times to run for.
+                       This determines the effective sample size of the chains.
+                       Higher number = more robust results, but slower.
 
-        update      : int, default=100
-                      Number of samples between autocorrelation checks.
-                      Should not be too small, as this can slow things down
+        update       : int, default=1000
+                       Number of samples between autocorrelation checks.
+                       Should not be too small, as this can slow things down
 
         max_iterations : int, default=1000000
                          Max. number of iterations to run for, regardless of
@@ -937,6 +938,11 @@ class Gibbs(object):
                        and will automatically resume from where it left off.
                        It is up to the user to ensure that the timing model
                        is consistent with the earlier run that is being resumed!
+
+        num_NUTS_steps : int, default=1
+                       Number of NUTS iterations to perform in the intermediate
+                       template/hyperparameter sampling steps. Higher numbers are slower
+                       but may lead to shorter overall autocorrelation times
 
         """
 
@@ -1052,7 +1058,7 @@ class Gibbs(object):
 
         if self.nhyp > 0:
             all_hyp = self.timing_sampler._fill_noise_pars(hyp)
-            inv_prior_cov, _ = self.timing_sampler._make_psd_cov(all_hyp)
+            inv_prior_cov = self.timing_sampler._make_psd_cov(all_hyp)
         else:
             inv_prior_cov = jnp.array(self.inv_prior_cov)
 
@@ -1118,14 +1124,14 @@ class Gibbs(object):
                 hyp = state[2]
 
                 tau, key = self.tau_sampler.sample_tau_given_theta(
-                    tau, jphi - phase_shifts, key
+                    tau, jphi - phase_shifts, key, num_NUTS_steps
                 )
                 mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
                     tau, jphi - phase_shifts, key
                 )
                 hyp, theta, phase_shifts, key = (
                     self.timing_sampler.sample_lambda_theta_given_tau_zm(
-                        hyp, mu_z, sigma_z, key
+                        hyp, mu_z, sigma_z, key, num_NUTS_steps
                     )
                 )
                 logL = self.tau_sampler._log_like(tau, jphi - phase_shifts)
@@ -1301,7 +1307,7 @@ class Gibbs(object):
                     progress.update(c)
                     progress.refresh()
 
-                n_acor = (c - start) / acor_time
+                n_acor = (c + 1 - start) / acor_time
 
                 if plots:
                     ax[0].clear()
