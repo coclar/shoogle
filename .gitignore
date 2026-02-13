@@ -4,7 +4,7 @@
 *.ipynb_checkpoints
 *.DS_Store
 src/shoogle_pulsar.egg-info
-examples/J1526-2744/J1526-2744_output*
-examples/B1957+20/B1957+20_shoogle_output*
+examples/J1526-2744/*
+examples/B1957+20/*
 dist/
 dev/
