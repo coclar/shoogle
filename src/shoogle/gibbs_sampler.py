@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 import corner
 import emcee
 from tqdm.auto import tqdm
-import time
+import time, datetime
 
 from astropy import units as u
 from astropy.coordinates import Angle
@@ -888,6 +888,7 @@ class Gibbs(object):
         outputfile="chains",
         resume=False,
         num_NUTS_steps=1,
+        seed=None,
     ):
         """
         Runs the Gibbs sampling loop.
@@ -960,7 +961,12 @@ class Gibbs(object):
 
         self.tau_sampler.tau_0 = tau_opt
 
-        key = None
+        if seed is None:
+            # 32-bit integer seed based on current POSIX microsecond
+            seed = np.int32(
+                datetime.datetime.now().timestamp() * 1e6 % np.iinfo(np.int32).max
+            )
+        key = jax.random.key(seed)
 
         if resume is True:
             dat = np.load(outputfile + ".npz")
@@ -1020,9 +1026,6 @@ class Gibbs(object):
             plt.ion()
             fig, ax = plt.subplots(1, 3, figsize=(15, 5))
 
-        if key is None:
-            key = jax.random.key(0)
-
         if self.nhyp > 0:
             all_hyp = self.timing_sampler._fill_noise_pars(hyp)
             inv_prior_cov = self.timing_sampler._make_psd_cov(all_hyp)
@@ -1056,7 +1059,7 @@ class Gibbs(object):
 
         if not hasattr(self.tau_sampler, "kernel"):
             print("Setting up template sampler")
-            tau, key = self.tau_sampler.setup_sampler(jphi - phase_shifts)
+            tau, key = self.tau_sampler.setup_sampler(jphi - phase_shifts, key)
             print()
 
         if self.nhyp > 0:
@@ -1074,11 +1077,9 @@ class Gibbs(object):
             self.timing_sampler.hyp_0 = jnp.array(hyp)
             if not hasattr(self.timing_sampler, "kernel"):
                 print("Setting up hyper-parameter sampler")
-                hyp, key = self.timing_sampler.setup_sampler(mu_z, sigma_z)
+                hyp, key = self.timing_sampler.setup_sampler(mu_z, sigma_z, key)
                 print()
         c = 0
-
-        keys = jax.random.split(key, 10000)
 
         if self.nhyp > 0:
             state = (phase_shifts, tau, hyp)
@@ -1141,6 +1142,8 @@ class Gibbs(object):
         progress.start_t = start_time
         progress.last_print_t = start_time
 
+        keys = jax.random.split(key, update + 1)
+        key = keys[-1]
         while (c < update or n_acor < n_acor_target) and (c < max_iterations):
 
             if c == len(self.loglike_chain):
@@ -1198,6 +1201,7 @@ class Gibbs(object):
             if c % update == update - 1:
 
                 output_dict = {
+                    "seed": seed,
                     "loglike_chain": self.loglike_chain[: c + 1],
                     "timing_chain": self.timing_chain[: c + 1],
                     "template_chain": self.template_chain[: c + 1],

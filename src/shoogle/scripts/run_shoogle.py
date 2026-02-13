@@ -1,7 +1,7 @@
 import sys
 from optparse import OptionParser
-import matplotlib.pyplot as plt
 
+import matplotlib.pyplot as plt
 
 from astropy.io import fits
 
@@ -100,6 +100,20 @@ def main(argv=None):
         default=False,
         help="Fit for energy-dependence in the template pulse profile",
     )
+    parser.add_option(
+        "-s",
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed for JAX random key generator (default = based on POSIX timestamp)",
+    )
+    parser.add_option(
+        "-S",
+        "--steps",
+        type=int,
+        default=1,
+        help="Number of NUTS steps to take in each intermediate sampling stage (default=1). More steps are slower, but possibly more efficient by reducing the overall Gibbs sampling autocorrelation time. ",
+    )
     (options, args) = parser.parse_args(argv)
 
     if options.outputfile is None:
@@ -145,6 +159,8 @@ def main(argv=None):
         max_iterations=options.max_iterations,
         n_acor_target=options.nacor,
         update=options.update,
+        seed=options.seed,
+        num_NUTS_steps=options.steps,
     )
 
     res = GibbsResults(G)

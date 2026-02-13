@@ -334,7 +334,7 @@ class TemplateSampler(object):
 
         return x
 
-    def setup_sampler(self, phases):
+    def setup_sampler(self, phases, rng_key):
         """
         Performs a warm-up run to tune parameters (step size, covariance matrix)
         of the blackjax NUTS sampler for efficient sampling later.
@@ -355,9 +355,8 @@ class TemplateSampler(object):
 
         x0 = self._phys_to_samples(self.tau_0)
 
-        rng_key = jax.random.key(0)
-        rng_key, warmup_key, sample_key = jax.random.split(rng_key, 3)
-        (state, parameters), _ = warmup.run(warmup_key, x0, num_steps=1000)
+        warmup_key, sample_key = jax.random.split(rng_key, 2)
+        (state, parameters), _ = warmup.run(warmup_key, x0, num_steps=2000)
 
         self.nuts_params = parameters
         self.logprob_fn = jax.jit(self._log_post)
@@ -1450,7 +1449,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
         return logpost
 
-    def setup_sampler(self, mu_z, sigma_z):
+    def setup_sampler(self, mu_z, sigma_z, rng_key):
         """
         Performs a warm-up run to tune parameters (step size, covariance matrix)
         of the blackjax NUTS sampler for efficient sampling later.
@@ -1482,9 +1481,8 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
             blackjax.nuts, logprob_fn, progress_bar=True
         )
 
-        rng_key = jax.random.key(0)
-        rng_key, warmup_key, sample_key = jax.random.split(rng_key, 3)
-        (state, parameters), _ = warmup.run(warmup_key, x0, num_steps=1000)
+        warmup_key, sample_key = jax.random.split(rng_key, 2)
+        (state, parameters), _ = warmup.run(warmup_key, x0, num_steps=2000)
 
         self.nuts_params = parameters
         self.sample_key = sample_key
