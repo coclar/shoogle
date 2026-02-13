@@ -3,9 +3,10 @@ from optparse import OptionParser
 import glob
 import matplotlib.pyplot as plt
 
+from astropy.io import fits
+
 from shoogle.gibbs_sampler import Gibbs
 from shoogle.plot_gibbs_results import GibbsResults, fermi_lc
-from shoogle.utils import *
 
 
 def main(argv=None):
@@ -23,8 +24,8 @@ def main(argv=None):
         "-W",
         "--weightfield",
         type="string",
-        default="WEIGHT",
-        help="Column name in FT1 file for photon weights",
+        default=None,
+        help="Column name in FT1 file for photon weights (optional, default is to guess the column)",
     )
     parser.add_option(
         "-p",
@@ -32,6 +33,13 @@ def main(argv=None):
         type="string",
         default=None,
         help="Pulsar ephemeris .par file",
+    )
+    parser.add_option(
+        "-P",
+        "--priorfile",
+        type="string",
+        default=None,
+        help="File defining timing model priors and noise hyperparameters",
     )
     parser.add_option(
         "-t", "--template", type="string", default=None, help="Template pulse profile"
@@ -71,15 +79,44 @@ def main(argv=None):
         default=False,
         help="Fit for energy-dependence in the template pulse profile",
     )
+    parser.add_option(
+        "-q",
+        "--quiet",
+        action="store_true",
+        default=False,
+        help="Quiet mode, only save plots, don't show them",
+    )
 
     (options, args) = parser.parse_args(argv)
 
+    if options.weightfield is None:
+        weightfield = None
+        f = fits.open(options.ft1)
+        colnames = f[1].data.names
+
+        for c in colnames:
+            w = None
+            if c == "WEIGHT":
+                w = "WEIGHT"
+            elif c == "MODEL_WEIGHT":
+                w = "MODEL_WEIGHT"
+            elif c[:4] == "4FGL":
+                w = c
+
+            if w is not None:
+                if weightfield is not None:
+                    raise ValueError("Cannot unambiguously determine the weight column")
+                weightfield = w
+    else:
+        weightfield = options.weightfield
+
     psr = Gibbs(
         parfile=options.parfile,
+        priorfile=options.priorfile,
         ft1file=options.ft1,
         ft2file=options.ft2,
         timfile=options.radio_toas,
-        weightfield=options.weightfield,
+        weightfield=weightfield,
         templatefile=options.template,
         wmin=options.weightcut,
         Edep=options.Edep,
@@ -89,16 +126,16 @@ def main(argv=None):
     res.load_results(load_from=[options.output + ".npz"], decimated=True)
     res.MAP_phases()
 
-    fig, ax = plt.subplots(2, 1, height_ratios=[1, 2], figsize=(7, 12))
+    fig1, ax = plt.subplots(2, 1, height_ratios=[1, 2], figsize=(7, 12))
     fermi_lc(res.phi_MAP, res.psr.w, ax=ax[0], xbins=50)
     res.plot_templates(ax[0])
     res.scatter_phases(res.phi_MAP, ax[1])
+    plt.savefig(options.output + "_phases.pdf", bbox_inches="tight")
 
     if hasattr(res.psr, "radio_toas"):
         fig2, ax2 = plt.subplots(2, 2, sharex="col")
         res.plot_radio_resids(ax2)
-    plt.savefig(options.output + "_phases.pdf", bbox_inches="tight")
-    plt.show()
+        plt.savefig(options.output + "_radio.pdf", bbox_inches="tight")
 
     if options.output:
         res.write_tvsph(options.output + "_MAP.tvsph", res.phi_MAP)
@@ -110,28 +147,26 @@ def main(argv=None):
             res.write_new_parfile(options.output + ".par")
 
     if options.Edep:
-        fig, ax = res.plot_Edep_profiles()
+        fig2, ax = res.plot_Edep_profiles()
         plt.savefig(options.output + "_Edep_profiles.pdf", bbox_inches="tight")
-    plt.show()
 
     if res.psr.fit_TN or res.psr.fit_OPV:
-        fig1 = res.hyp_corner()
+        fig3 = res.hyp_corner()
         if options.output:
             plt.savefig(options.output + "_hyperparameters.pdf", bbox_inches="tight")
-        plt.show()
 
-    fig2 = res.timing_corner(nWX=psr.nWXfreqs)
+    fig4 = res.timing_corner(nWX=psr.nWXfreqs)
     if options.output:
         plt.savefig(options.output + "_timingparameters.pdf", bbox_inches="tight")
-    plt.show()
 
-    fig3 = res.template_corner()
+    fig5 = res.template_corner()
     if options.output:
         plt.savefig(options.output + "_templateparameters.pdf", bbox_inches="tight")
-    plt.show()
 
     if res.psr.fit_TN or res.psr.fit_OPV:
-        res.summary_plot()
+        fig6 = res.summary_plot()
         if options.output:
             plt.savefig(options.output + "_summary.pdf", bbox_inches="tight")
+
+    if not options.quiet:
         plt.show()

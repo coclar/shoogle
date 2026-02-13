@@ -25,7 +25,7 @@ def main(argv=None):
         "--weightfield",
         type="string",
         default=None,
-        help="Column name in FT1 file for photon weights",
+        help="Column name in FT1 file for photon weights (optional, default is to guess the column)",
     )
     parser.add_option(
         "-r",
@@ -149,7 +149,6 @@ def main(argv=None):
 
     res = GibbsResults(G)
     res.load_results(load_from=[options.outputfile + ".npz"], decimated=True)
-    res.MAP_phases()
 
     res.write_tvsph(options.outputfile + "_MAP.tvsph", res.phi_MAP)
     res.write_new_template(options.outputfile + "_prof.dat")
@@ -179,6 +178,10 @@ def main(argv=None):
 
     fig4 = res.summary_plot()
     plt.savefig(options.outputfile + "_summary" + endfile, bbox_inches="tight")
+
+    if options.Edep:
+        fig5, ax = res.plot_Edep_profiles()
+        plt.savefig(options.outputfile + "_Edep_prof" + endfile, bbox_inches="tight")
 
     if not options.quiet:
         plt.show()

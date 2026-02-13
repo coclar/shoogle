@@ -858,7 +858,7 @@ class GibbsResults(object):
             alpha=0.25,
             facecolor=color,
         )
-        ax.set_xlim(-0.5, 0.5)
+        # ax.set_xlim(-0.5, 0.5)
         ax.set_xlabel("$\\Delta \\phi(t)$")
 
         return mu_samples
@@ -1457,9 +1457,6 @@ class GibbsResults(object):
                         )
                     )
 
-                if idx % 10 == 0:
-                    print(idx, "/", len(dTASC), end="\r")
-
             pdf = np.exp(logL - logL.max())
             pdf /= np.trapezoid(pdf, dTASC)
             dTASC_sq = (
@@ -1490,7 +1487,6 @@ class GibbsResults(object):
 
         for c, i in enumerate(samples):
 
-            print(c, end="\r")
             s = 0
             model_powspec = np.zeros(len(f))
             t = 0
@@ -1617,7 +1613,7 @@ class GibbsResults(object):
         tasc_slwin=None,
         dtasc_l=0,
         dtasc_r=0,
-        xbins=50,
+        xbins=100,
         tn_xunits="1/yr",
         opv_xunits="1/yr",
         tn_yunits="s ** 2 * yr",
