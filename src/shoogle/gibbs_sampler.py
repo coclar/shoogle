@@ -946,7 +946,7 @@ class Gibbs(object):
 
         """
 
-        # template alignment check
+        # Make sure template is phase-aligned with the data
         logL_max = 0
         for dphi in np.arange(-0.5, 0.5, 0.001):
             tau = np.array(self.tau_sampler.tau_0)
@@ -959,39 +959,6 @@ class Gibbs(object):
                 tau_opt = jnp.array(tau)
 
         self.tau_sampler.tau_0 = tau_opt
-
-        fig, ax = plt.subplots(2, 1, sharex=True, height_ratios=[1, 2], figsize=(5, 10))
-        i = np.argsort(self.w)
-        p = np.arange(0, 1, 0.001)
-        ax[1].scatter(
-            np.mod(self.phi, 1.0)[i], self.t[i], 5, c=self.w[i], cmap="binary"
-        )
-        fermi_lc(np.mod(self.phi, 1.0), self.w, ax=ax[0], xbins=100)
-        S = np.sum(self.w**2) / 100
-        B = np.sum(self.w * (1 - self.w)) / 100
-
-        if self.Edep:
-            template = self.tau_sampler.template(
-                self.tau_sampler.tau_0,
-                p,
-                np.ones_like(p) * np.average(self.log10E, weights=self.w),
-            )
-        else:
-            template = self.tau_sampler.template(self.tau_sampler.tau_0, p)
-        ax[0].plot(p, B + S * template, color="orange")
-        ax[0].set_xlim(0.0, 1.0)
-        ax[0].set_ylim(0.0, B + S * template.max() * 1.05)
-        ax[1].set_xlabel("Spin phase")
-        ax[1].set_ylabel("Time (MJD)")
-        try:
-            plt.savefig(outputfile + "_template_alignment_check.png")
-        except TypeError:
-            pass
-
-        if plots:
-            plt.show()
-        else:
-            plt.close()
 
         key = None
 
@@ -1150,7 +1117,7 @@ class Gibbs(object):
                 tau = state[1]
 
                 tau, key = self.tau_sampler.sample_tau_given_theta(
-                    tau, jphi - phase_shifts, key
+                    tau, jphi - phase_shifts, key, num_NUTS_steps
                 )
                 mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
                     tau, jphi - phase_shifts, key
