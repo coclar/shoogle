@@ -180,12 +180,12 @@ class BrokenPowerLaw(NoiseModel):
                 -np.log10(self.Tobs * (u.d / u.yr)) - 1,
                 -np.log10(self.Tobs * (u.d / u.yr)) + 2,
             ],
-            [1, 9],
+            [1.0, 10.0],
         ]
 
         if "OPV" in self.prefix:
             self.bounds[0] = [-15, -5]
-            self.bounds[2] = [1.0, 9.0]
+            self.bounds[2] = [1.0, 10.0]
 
     def cov(self, t, pars):
 
@@ -265,13 +265,13 @@ class FlatTailBrokenPowerLaw(NoiseModel):
                 -np.log10(self.Tobs * (u.d / u.yr)) - 1,
                 -np.log10(self.Tobs * (u.d / u.yr)) + 2,
             ],
-            [1, 9],
-            [-20, -9],
+            [1.0, 10.0],
+            [-20.0, -9.0],
         ]
 
         if "OPV" in self.prefix:
             self.bounds[0] = [-15, -5]
-            self.bounds[2] = [1.0, 9.0]
+            self.bounds[2] = [1.0, 10.0]
 
     """
     def cov(self, t, pars):
