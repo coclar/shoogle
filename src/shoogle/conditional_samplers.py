@@ -1116,7 +1116,7 @@ class TimingModelSampler(object):
         return theta, phase_shifts, key
 
 
-def bpl_powspec(pars, freqs):
+def bpl_log10powspec(pars, freqs):
     """
     Evaluates a smoothly broken power-law PSD
 
@@ -1144,17 +1144,17 @@ def bpl_powspec(pars, freqs):
     logfc = pars[1]
     gamma = pars[2]
 
-    Asquared = 10 ** (2 * logA + LOG10YR3_TO_S2D)
+    log10Asquared = 2 * logA + LOG10YR3_TO_S2D
     fc = 10**logfc
 
-    norm = Asquared / (12 * jnp.pi**2) * (fc ** (-gamma))
+    log10norm = log10Asquared - jnp.log10(12 * jnp.pi**2) + jnp.log10(fc ** (-gamma))
 
-    psd = norm * (1 + (freqs / fc) ** 2) ** (-gamma / 2)
+    log10psd = log10norm + jnp.log10((1 + (freqs / fc) ** 2) ** (-gamma / 2))
 
-    return psd
+    return log10psd
 
 
-def bpl_flattail_powspec(pars, freqs):
+def bpl_flattail_log10powspec(pars, freqs):
     """
     Evaluates a smoothly broken power-law PSD with a flat-tail
 
@@ -1180,13 +1180,18 @@ def bpl_flattail_powspec(pars, freqs):
                 Power-spectral density, in units of s^2 d
     """
 
-    bpl = bpl_powspec(pars, freqs)
-    logkappa = pars[3]
+    log10bpl = bpl_log10powspec(pars, freqs)
+    log10kappa = pars[3]
 
-    flat = 10 ** (2 * logkappa + LOG10YR3_TO_S2D)
-    psd = jnp.maximum(bpl, flat)
+    log10flat = 2 * log10kappa + LOG10YR3_TO_S2D
+    log10psd = jax.scipy.special.logsumexp(
+        jnp.concatenate(
+            (log10bpl[:, None], jnp.ones_like(log10bpl)[:, None] * log10flat), axis=1
+        ),
+        axis=1,
+    )
 
-    return psd
+    return log10psd
 
 
 class NoiseAndTimingModelSampler(TimingModelSampler):
@@ -1386,27 +1391,25 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         inv_prior_cov : Array, size (npars, npars)
                         Inverse prior covariance matrix
 
-        logdet_prior : Log-determinant of prior covariance matrix)
         """
 
         K = self.K0.copy()
 
         for c in range(len(self.noise_models)):
 
-            powspec = (
-                jnp.where(
-                    self.noise_freqs[c] > 0,
-                    (
-                        bpl_flattail_powspec(all_hyp[c], self.noise_freqs[c])
-                        * self.min_freqs[c]
-                        * INVYR_TO_INVDAY
-                    ),
-                    0.0,
-                )
-                * self.scales[c]
+            log10powspec = jnp.where(
+                self.noise_freqs[c] > 0,
+                (
+                    bpl_flattail_log10powspec(all_hyp[c], self.noise_freqs[c])
+                    + jnp.log10(self.min_freqs[c])
+                    + jnp.log10(INVYR_TO_INVDAY)
+                    + jnp.log10(self.scales[c])
+                    + 2 * jnp.log10(self.parameter_scales)
+                ),
+                -1000,
             )
 
-            K += powspec * self.parameter_scales**2
+            K += 10 ** (log10powspec)
 
         Kinv = jnp.where(K > 0, 1.0 / K, 0.0)
 
