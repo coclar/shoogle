@@ -950,10 +950,16 @@ class Gibbs(object):
         # Make sure template is phase-aligned with the data
         logL_max = 0
         for dphi in np.arange(-0.5, 0.5, 0.001):
-            tau = np.array(self.tau_sampler.tau_0)
+            tau = np.copy(self.tau_sampler.tau_0)
             tau[self.npeaks : 2 * self.npeaks] += dphi
+            tau[self.npeaks : 2 * self.npeaks] = np.mod(
+                tau[self.npeaks : 2 * self.npeaks], 1.0
+            )
             if self.Edep:
                 tau[4 * self.npeaks : 5 * self.npeaks] += dphi
+            tau[4 * self.npeaks : 5 * self.npeaks] = np.mod(
+                tau[4 * self.npeaks : 5 * self.npeaks], 1.0
+            )
             logL = self.tau_sampler._log_like(jnp.array(tau), jnp.array(self.phi))
             if logL > logL_max:
                 logL_max = logL
