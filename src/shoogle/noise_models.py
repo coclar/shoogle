@@ -1,7 +1,7 @@
 import numpy as np
 
 from astropy import units as u
-from scipy.special import gamma, beta
+from scipy.special import gamma, beta, logsumexp
 from sklearn.gaussian_process.kernels import Matern
 
 
@@ -313,7 +313,17 @@ class FlatTailBrokenPowerLaw(NoiseModel):
             f = self.freqs
 
         psd = norm * (1 + (f / fc) ** 2) ** (-GAM / 2)
-        flat = 10 ** (2 * log10_kappa) * u.yr**3
-        psd = np.maximum(psd, flat)
+        log10bpl = np.log10(psd.to_value('yr**3')) 
+        log10flat = (2 * log10_kappa) # * u.yr**3
+        #psd = np.maximum(psd, flat)
+
+        ln10 = np.log(10.0)
+        log10psd = logsumexp(
+            np.concatenate(
+                (log10bpl[:, None]* ln10, np.ones_like(log10bpl)[:, None] * log10flat * ln10), axis=1
+            ),
+            axis=1,
+        ) / ln10
+        psd = 10.0 ** log10psd * u.yr**3
 
         return psd.to_value("s ** 2 * d")

@@ -1158,8 +1158,8 @@ def bpl_flattail_log10powspec(pars, freqs):
     """
     Evaluates a smoothly broken power-law PSD with a flat-tail
 
-    PSD = max((A^2 yr^3 / 12 pi^2) * (fc / fyr)^(-gamma) * (1 + (f / fc)^2)^(-gamma/2),
-              kappa^2)
+    PSD = (A^2 yr^3 / 12 pi^2) * (fc / fyr)^(-gamma) * (1 + (f / fc)^2)^(-gamma/2)+
+              kappa^2
 
     Parameters
     ----------
@@ -1182,14 +1182,15 @@ def bpl_flattail_log10powspec(pars, freqs):
 
     log10bpl = bpl_log10powspec(pars, freqs)
     log10kappa = pars[3]
+    ln10 = jnp.log(10.0)
 
     log10flat = 2 * log10kappa + LOG10YR3_TO_S2D
     log10psd = jax.scipy.special.logsumexp(
         jnp.concatenate(
-            (log10bpl[:, None], jnp.ones_like(log10bpl)[:, None] * log10flat), axis=1
+            (log10bpl[:, None]* ln10, jnp.ones_like(log10bpl)[:, None] * log10flat * ln10), axis=1
         ),
         axis=1,
-    )
+    ) / ln10
 
     return log10psd
 
