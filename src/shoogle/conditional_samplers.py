@@ -8,6 +8,9 @@ from tqdm.auto import tqdm
 from astropy import units as u
 import pickle
 from pint.templates.lctemplate import LCTemplate, prim_io
+from pint.templates.lceprimitives import LCEGaussian
+from pint.templates.lcenorm import ENormAngles
+import json
 
 ONE_OVER_SQRT2PI = 1.0 / (jnp.sqrt(2 * jnp.pi))
 LOG10YR3_TO_S2D = jnp.log10((1.0 * u.yr**3).to_value("s ** 2 * d"))
@@ -20,6 +23,36 @@ def read_template(proffile, extra_phase=None):
         with open(proffile, "rb") as input_file:
             template = pickle.load(input_file)
             input_file.close()
+
+        amps = np.array([A for A in template.norms()])
+        mus = np.mod(np.array([p.get_location() for p in template.primitives]), 1.0)
+        sigmas = np.array([p.get_width() for p in template.primitives])
+
+    elif ".json" in proffile:
+            
+        with open(proffile,'r') as input_file:
+            d = json.loads(input_file.read())
+            input_file.close()
+        pdicts = d['primitives']
+        primitives = []
+        check = 0
+        for pd in pdicts:
+            print('check = ',check)
+            check += 1
+            const = eval(pd['name'])
+            kwargs = {}
+            for key in ['p','free','slope','slope_free']:
+                if key in pd:
+                    kwargs[key] = pd[key]
+            primitives.append(const(**kwargs))
+        ndict = d['norms']
+        const = eval(ndict['name'])
+        kwargs = {}
+        for key in ['free','slope','slope_free']:
+            if key in ndict:
+                kwargs[key] = ndict[key]
+        norms = const(d['norms']['norms'],**kwargs)
+        template = LCTemplate(primitives,norms=norms,cache_kwargs=d['cache_kwargs'])
 
         amps = np.array([A for A in template.norms()])
         mus = np.mod(np.array([p.get_location() for p in template.primitives]), 1.0)
