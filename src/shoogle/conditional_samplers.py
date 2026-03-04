@@ -48,7 +48,6 @@ def read_template(proffile, extra_phase=None):
         pdicts = d['primitives']
         primitives = []
         for pd in pdicts:
-            check += 1
             const = eval(pd['name'])
             kwargs = {}
             for key in ['p','free','slope','slope_free']:
