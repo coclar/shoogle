@@ -16,6 +16,18 @@ ONE_OVER_SQRT2PI = 1.0 / (jnp.sqrt(2 * jnp.pi))
 LOG10YR3_TO_S2D = jnp.log10((1.0 * u.yr**3).to_value("s ** 2 * d"))
 INVYR_TO_INVDAY = (1.0 / u.yr).to_value("1/d")
 
+from pint.templates.lcprimitives import LCPrimitive
+
+def new_default_bounds(self):
+    bounds = [[] for _ in range(len(self.p))]
+    bounds[0] = [0.001, 0.5]      # width
+    bounds[-1] = [-1, 1]         # position
+    if len(bounds) > 2:
+        bounds[1] = [0.001, 0.5]
+
+    return bounds
+
+LCPrimitive._default_bounds = new_default_bounds
 
 def read_template(proffile, extra_phase=None):
 
@@ -35,9 +47,7 @@ def read_template(proffile, extra_phase=None):
             input_file.close()
         pdicts = d['primitives']
         primitives = []
-        check = 0
         for pd in pdicts:
-            print('check = ',check)
             check += 1
             const = eval(pd['name'])
             kwargs = {}
