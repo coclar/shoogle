@@ -47,6 +47,18 @@ git clone https://github.com/coclar/shoogle.git
 cd shoogle
 pip install -e .
 ```
+or
+```
+pip install -e ".[nb]"
+```
+or
+```
+pip install -e ".[cuda12,nb]"
+```
+or
+```
+pip install -e ".[cuda13,nb]"
+```
 
 We use `black` and `pre-commit` to keep the code tidy.
 
