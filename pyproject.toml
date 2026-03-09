@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "shoogle-pulsar"
-version = "0.0.2"
+version = "0.1.0"
 authors = [
   { name="Colin Clark", email="colin.clark@aei.mpg.de" },
   { name="Serena Valtolina", email="svaltolina@mpifr-bonn.mpg.de" },
@@ -32,11 +32,15 @@ dependencies = [
     "emcee>=3.0.1",
     "corner>=2.0.1",
     "scikit-learn>=1.5.1",
-    "tqdm>=4.67.1"
+    "tqdm>=4.67.1",
+    "jax[cpu]>=0.4.31",
+    "blackjax>1.4.0"
 ]
 
 [project.optional-dependencies]
 nb = ["jupyterlab","ipywidgets","widgetsnbextension"]
+cuda12 = ["jax[cuda12]>=0.4.31"]
+cuda13 = ["jax[cuda13]>=0.4.31"]
 
 [project.urls]
 Homepage = "https://github.com/coclar/shoogle"
