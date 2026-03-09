@@ -46,12 +46,13 @@ should be available whenever your python environment is activated.
 
 ### Running the sampler
 
-To run the sampler, you will need: * An "FT1" file, which is a .fits file containing the Fermi
-photon data. These files can be obtained from the [FSSC](https://fermi.gsfc.nasa.gov/ssc/data/). You
-will need to run `gtsrcprob` from the [Fermitools](https://fermi.gsfc.nasa.gov/ssc/data/analysis/)
-to generate a column in the FT1 file containing photon probability weights. Pre-made FT1 files
-containing these weights for pulsars included in the Third Pulsar Catalog are also available from
-the [FSSC 3PC page](https://fermi.gsfc.nasa.gov/ssc/data/access/lat/3rd_PSR_catalog/).
+To run the sampler, you will need:
+
+* An "FT1" file, which is a .fits file containing the Fermi photon data. These files can be obtained
+  from the [FSSC](https://fermi.gsfc.nasa.gov/ssc/data/). You will need to run `gtsrcprob` from the
+  [Fermitools](https://fermi.gsfc.nasa.gov/ssc/data/analysis/) to generate a column in the FT1 file
+  containing photon probability weights. Pre-made FT1 files containing these weights for pulsars
+  included in the Third Pulsar Catalog are also available from the [FSSC 3PC page](https://fermi.gsfc.nasa.gov/ssc/data/access/lat/3rd_PSR_catalog/).
 
 * An "FT2" file: the "spacecraft" fits file containing telemetry. This can also be downloaded from
   the [FSSC](https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/mission/spacecraft/)
