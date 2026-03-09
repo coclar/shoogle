@@ -9,7 +9,7 @@ The full method is described in the shoogle paper:
 
 _Timing Gamma-ray Pulsars using Gibbs Sampling_  
 Clark, C. J., Valtolina, S., Nieder, L. and van Haasteren, R.  
-(2026), A&A, submitted, [arXiv:2601.07592](https://arxiv.org/abs/2601.07592)
+(2026), A&A, in press, [arXiv:2601.07592](https://arxiv.org/abs/2601.07592)
 
 Please cite our paper if you use shoogle in your work.
 
@@ -55,7 +55,7 @@ To run the sampler, you will need:
   included in the Third Pulsar Catalog are also available from the [FSSC 3PC page](https://fermi.gsfc.nasa.gov/ssc/data/access/lat/3rd_PSR_catalog/).
 
 * An "FT2" file: the "spacecraft" fits file containing telemetry. This can also be downloaded from
-  the [FSSC](https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/mission/spacecraft/)
+  the [FSSC](https://heasarc.gsfc.nasa.gov/FTP/fermi/data/lat/mission/spacecraft/).
 
 * Optionally, a PINT-compatible .tim file containing radio ToAs for the same pulsar, if you want to
   try the experimental joint radio/gamma-ray fitting capabilities.
@@ -87,11 +87,13 @@ can be used as a guideline.
 Notes:
 * The timing model should be in a PINT-compatible .par file, with lines following:
   ```
-  [PARAMETER] [Initial value] [free] [Uncertainty (not used by shoogle)]
+  [PARAMETER] [Initial value] [free] [Uncertainty]
   ```
+  The uncertainties specified here are not used by shoogle.
 
-* Timing model parameters included in the priors file will have a Gaussian prior applied to them,
-  centred on the specified value and with the provided uncertainty as the width.
+* Timing model parameters included in the priors file, using the same PINT syntax above, will have a
+  Gaussian prior applied to them, centred on the specified value and with the provided uncertainty
+  as the width.
   
   For example:
   ```
@@ -114,7 +116,8 @@ Notes:
   `TN_REDKAPPA`: (optional) log10 of flat tail level, in units of yr^{3/2}.
                  Defaults to -20, an extremely small value.
 
-  For orbital period variations, replace `TN_` with `OPV_`
+  For orbital period variations, replace `TN_` with `OPV_`, in which case the amplitude now refers
+  to variations in the pulsar's time of ascending node.
 
   Additional components can be added to the noise model by adding,
   `TN2_REDAMP`, `TN2_REDFC`, `TN2_REDGAM`, `TN3_REDAMP` ... etc.
