@@ -45,7 +45,7 @@ def fermi_lc(
     width = bins[1] - bins[0]
     bg = (weights.sum() - ((weights**2.0).sum())) / xbins
     src = (weights**2.0).sum() / xbins
-    errors = np.sqrt(sqerrors + 1)
+    errors = np.sqrt(sqerrors + np.max(weights**2))
 
     if ax is None:
         fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
@@ -114,8 +114,7 @@ class GibbsResults(object):
     def __init__(self, psr):
         self.psr = psr
 
-    def load_results(self, load_from=None, decimated=False):
-        decimate_factor = 2
+    def load_results(self, load_from=None, decimated=False, decimate_factor=2):
 
         loglike_chain = np.array([]).reshape(0)
         timing_chain = np.array([]).reshape(0, self.psr.n_timing_pars)
@@ -648,7 +647,7 @@ class GibbsResults(object):
         ax.set_ylabel("Time (MJD)")
         ax.xaxis.set_tick_params(bottom=True, labelbottom=True)
 
-    def plot_templates(self, ax, xbins=50):
+    def plot_templates(self, ax, xbins=50, num_samples=100):
 
         tau = self.template_MAP
 
@@ -680,7 +679,7 @@ class GibbsResults(object):
             )
 
         for i in np.random.choice(
-            np.arange(np.shape(self.template_chain)[0]), replace=True, size=100
+            np.arange(np.shape(self.template_chain)[0]), replace=True, size=num_samples
         ):
             tau = self.template_chain[i, :]
             if self.psr.Edep:
@@ -756,13 +755,13 @@ class GibbsResults(object):
             (TASCidx, FB0idx, FB1idx, self.psr.OPVCinds, self.psr.OPVSinds)
         )
 
-        mu_orb_MAP = self.psr.Mo[:, TASCidx] @ theta_MAP[TASCidx]
-        mu_orb_MAP += self.psr.Mo[:, FB0idx] @ theta_MAP[FB0idx]
-        # mu_orb_MAP += self.psr.Mo[:,FB1idx] @ theta_MAP[FB1idx]
-        mu_orb_MAP += (
+        mu_orb_prior = self.psr.Mo[:, TASCidx] @ self.psr.theta_prior[TASCidx]
+        mu_orb_prior += self.psr.Mo[:, FB0idx] @ self.psr.theta_prior[FB0idx]
+        mu_orb_prior += self.psr.Mo[:, FB1idx] @ self.psr.theta_prior[FB1idx]
+        mu_orb_prior += (
             self.psr.Mo[:, self.psr.OPVCinds] @ self.psr.theta_prior[self.psr.OPVCinds]
         )
-        mu_orb_MAP += (
+        mu_orb_prior += (
             self.psr.Mo[:, self.psr.OPVSinds] @ self.psr.theta_prior[self.psr.OPVSinds]
         )
 
@@ -775,7 +774,7 @@ class GibbsResults(object):
         ):
 
             theta = np.concatenate((self.timing_chain[i], self.opv_amps_chain[i]))[idxs]
-            mu_orbs[:, c] = self.psr.Mo[:, idxs] @ theta - mu_orb_MAP
+            mu_orbs[:, c] = self.psr.Mo[:, idxs] @ theta - mu_orb_prior
 
         mu_orbs = np.sort(mu_orbs, axis=1)
         mu_orbs -= np.mean(mu_orbs)
@@ -1614,6 +1613,7 @@ class GibbsResults(object):
         dtasc_l=0,
         dtasc_r=0,
         xbins=100,
+        num_templates=100,
         tn_xunits="1/yr",
         opv_xunits="1/yr",
         tn_yunits="s ** 2 * yr",
@@ -1648,7 +1648,7 @@ class GibbsResults(object):
             self.MAP_phases()
 
         fermi_lc(self.phi_MAP, self.psr.w, ax=ax[0, 0], xbins=xbins)
-        self.plot_templates(ax[0, 0], xbins=xbins)
+        self.plot_templates(ax[0, 0], xbins=xbins, num_samples=num_templates)
         self.scatter_phases(self.phi_MAP, ax[1, 0])
 
         c = 1
