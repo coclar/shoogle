@@ -45,8 +45,8 @@ def read_input_ft1_file(infile, FT2, weightfield, wmin, ephem_str):
         infile,
         weightcolumn=weightfield,
         minweight=wmin,
-        include_bipm=False,
-        planets=True,
+        include_bipm=True,
+        planets=False,
         ephem=ephem_str,
     )
 
