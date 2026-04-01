@@ -18,16 +18,19 @@ INVYR_TO_INVDAY = (1.0 / u.yr).to_value("1/d")
 
 from pint.templates.lcprimitives import LCPrimitive
 
+
 def new_default_bounds(self):
     bounds = [[] for _ in range(len(self.p))]
-    bounds[0] = [0.001, 0.5]      # width
-    bounds[-1] = [-1, 1]         # position
+    bounds[0] = [0.001, 0.5]  # width
+    bounds[-1] = [-1, 1]  # position
     if len(bounds) > 2:
         bounds[1] = [0.001, 0.5]
 
     return bounds
 
+
 LCPrimitive._default_bounds = new_default_bounds
+
 
 def read_template(proffile, extra_phase=None):
 
@@ -41,27 +44,27 @@ def read_template(proffile, extra_phase=None):
         sigmas = np.array([p.get_width() for p in template.primitives])
 
     elif ".json" in proffile:
-            
-        with open(proffile,'r') as input_file:
+
+        with open(proffile, "r") as input_file:
             d = json.loads(input_file.read())
             input_file.close()
-        pdicts = d['primitives']
+        pdicts = d["primitives"]
         primitives = []
         for pd in pdicts:
-            const = eval(pd['name'])
+            const = eval(pd["name"])
             kwargs = {}
-            for key in ['p','free','slope','slope_free']:
+            for key in ["p", "free", "slope", "slope_free"]:
                 if key in pd:
                     kwargs[key] = pd[key]
             primitives.append(const(**kwargs))
-        ndict = d['norms']
-        const = eval(ndict['name'])
+        ndict = d["norms"]
+        const = eval(ndict["name"])
         kwargs = {}
-        for key in ['free','slope','slope_free']:
+        for key in ["free", "slope", "slope_free"]:
             if key in ndict:
                 kwargs[key] = ndict[key]
-        norms = const(d['norms']['norms'],**kwargs)
-        template = LCTemplate(primitives,norms=norms,cache_kwargs=d['cache_kwargs'])
+        norms = const(d["norms"]["norms"], **kwargs)
+        template = LCTemplate(primitives, norms=norms, cache_kwargs=d["cache_kwargs"])
 
         amps = np.array([A for A in template.norms()])
         mus = np.mod(np.array([p.get_location() for p in template.primitives]), 1.0)
@@ -271,8 +274,12 @@ class TemplateSampler(object):
             A = A.at[p].set(Bk[p] * U)
             U -= A[p]
 
-        mu = jax.scipy.special.expit(x[self.npeaks : 2 * self.npeaks])
+        dmu = jax.scipy.special.expit(x[self.npeaks : 2 * self.npeaks])
         logprior += jnp.sum(jnp.log(mu * (1 - mu)))
+
+        # Undo mapping from dmu = mu - mu0 + 0.5
+        mu0 = self.tau_0[self.npeaks : self.npeaks * 2]
+        mu = dmu - 0.5 + mu0
 
         logsigma01 = jax.scipy.special.expit(x[2 * self.npeaks : 3 * self.npeaks])
         logprior += jnp.sum(jnp.log(logsigma01 * (1 - logsigma01)))
@@ -371,8 +378,12 @@ class TemplateSampler(object):
             self.maxlogsigma - self.minlogsigma
         )
 
+        # We'll take dmu = mu - mu0, then add 0.5,
+        # so dmu in (-0.5, 0.5) maps to (0, 1) for logit transform
+        mu0 = self.tau_0[self.npeaks : self.npeaks * 2]
+
         # then logit transformed -> (-inf,inf)
-        x = jax.scipy.special.logit(jnp.concatenate((Bk, mu, logsigma01)))
+        x = jax.scipy.special.logit(jnp.concatenate((Bk, mu - mu0 + 0.5, logsigma01)))
 
         return x
 
@@ -1227,12 +1238,19 @@ def bpl_flattail_log10powspec(pars, freqs):
     ln10 = jnp.log(10.0)
 
     log10flat = 2 * log10kappa + LOG10YR3_TO_S2D
-    log10psd = jax.scipy.special.logsumexp(
-        jnp.concatenate(
-            (log10bpl[:, None]* ln10, jnp.ones_like(log10bpl)[:, None] * log10flat * ln10), axis=1
-        ),
-        axis=1,
-    ) / ln10
+    log10psd = (
+        jax.scipy.special.logsumexp(
+            jnp.concatenate(
+                (
+                    log10bpl[:, None] * ln10,
+                    jnp.ones_like(log10bpl)[:, None] * log10flat * ln10,
+                ),
+                axis=1,
+            ),
+            axis=1,
+        )
+        / ln10
+    )
 
     return log10psd
 
