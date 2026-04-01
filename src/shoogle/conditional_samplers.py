@@ -275,7 +275,7 @@ class TemplateSampler(object):
             U -= A[p]
 
         dmu = jax.scipy.special.expit(x[self.npeaks : 2 * self.npeaks])
-        logprior += jnp.sum(jnp.log(mu * (1 - mu)))
+        logprior += jnp.sum(jnp.log(dmu * (1 - dmu)))
 
         # Undo mapping from dmu = mu - mu0 + 0.5
         mu0 = self.tau_0[self.npeaks : self.npeaks * 2]
@@ -477,6 +477,73 @@ class TemplateSampler(object):
 
         return samples, tau_keys[-1]
 
+    def unswap_peaks(self, tau):
+
+        K = self.npeaks
+
+        # Indices of all pairs of peaks (including matching pairs)
+        peak1, peak2 = jnp.triu_indices(K)
+
+        A = tau[:K]
+        mu = tau[K : 2 * K]
+        sigma = tau[2 * K : 3 * K]
+
+        A0 = self.tau_0[:K]
+        mu0 = self.tau_0[K : 2 * K]
+        sigma0 = self.tau_0[2 * K : 3 * K]
+
+        logL_swap = self.peak_similarity(
+            A0[peak1], mu0[peak1], sigma0[peak1], A[peak2], mu[peak2], sigma[peak2]
+        ) + self.peak_similarity(
+            A0[peak2], mu0[peak2], sigma0[peak2], A[peak1], mu[peak1], sigma[peak1]
+        )
+
+        swap_idx = jnp.argmax(logL_swap)
+
+        peak1_swap = peak1[swap_idx]
+        peak2_swap = peak2[swap_idx]
+
+        A_swapped = A.copy()
+        A_swapped = A_swapped.at[peak1_swap].set(A[peak2_swap])
+        A_swapped = A_swapped.at[peak2_swap].set(A[peak1_swap])
+
+        mu_swapped = mu.copy()
+        mu_swapped = mu_swapped.at[peak1_swap].set(mu[peak2_swap])
+        mu_swapped = mu_swapped.at[peak2_swap].set(mu[peak1_swap])
+
+        sigma_swapped = sigma.copy()
+        sigma_swapped = sigma_swapped.at[peak1_swap].set(sigma[peak2_swap])
+        sigma_swapped = sigma_swapped.at[peak2_swap].set(sigma[peak1_swap])
+
+        return jnp.concatenate((A_swapped, mu_swapped, sigma_swapped))
+
+    def peak_similarity(self, A1, mu1, sigma1, A2, mu2, sigma2):
+
+        diff = jnp.abs(mu1 - mu2)
+        diff = jnp.minimum(diff, 1 - diff)
+
+        KL_12 = 0.5 * (
+            (sigma1 / sigma2) ** 2
+            + diff**2 / sigma1**2
+            - 1
+            - jnp.log(sigma1**2 / sigma2**2)
+        )
+        KL_21 = 0.5 * (
+            (sigma2 / sigma1) ** 2
+            + diff**2 / sigma2**2
+            - 1
+            - jnp.log(sigma2**2 / sigma1**2)
+        )
+
+        entropy_1 = 0.5 * jnp.log(2 * jnp.pi * jnp.exp(1) * sigma1**2)
+        entropy_2 = 0.5 * jnp.log(2 * jnp.pi * jnp.exp(1) * sigma2**2)
+
+        logL = A1 * (entropy_1 - KL_12 + jnp.log(A2)) + A2 * (
+            entropy_2 - KL_21 + jnp.log(A1)
+        )
+
+        return logL
+
     def sample_tau_given_theta(self, tau, phases, key, num_steps=10):
         """
         Obtain one sample from the conditional distribution of tau
@@ -509,7 +576,7 @@ class TemplateSampler(object):
         """
 
         samples, key = self.sample(tau, phases, key, num_steps)
-        return samples[0][-1], key
+        return self.unswap_peaks(samples[0][-1]), key
 
 
 class EdepTemplateSampler(TemplateSampler):
