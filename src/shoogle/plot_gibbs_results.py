@@ -1681,6 +1681,9 @@ class GibbsResults(object):
             mask = np.where(
                 (self.psr.log10E > Ebounds[E]) & (self.psr.log10E < Ebounds[E + 1])
             )
+            if len(mask[0]) == 0:
+                continue
+
             fermi_lc(
                 self.phi_MAP[mask],
                 self.psr.w[mask],
