@@ -175,7 +175,7 @@ def main(argv=None):
         res.write_new_parfile(options.outputfile + ".par")
 
     endfile = ".png"
-    if G.fit_TN:
+    if G.fit_TN or G.fit_OPV:
         fig1 = res.hyp_corner()
         plt.savefig(
             options.outputfile + "_hyperparameters" + endfile, bbox_inches="tight"
