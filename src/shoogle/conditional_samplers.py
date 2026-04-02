@@ -515,6 +515,9 @@ class TemplateSampler(object):
         sigma_swapped = sigma_swapped.at[peak1_swap].set(sigma[peak2_swap])
         sigma_swapped = sigma_swapped.at[peak2_swap].set(sigma[peak1_swap])
 
+        # Ensure peak locations are still within bounds after swapping
+        mu_swapped = jnp.mod(mu_swapped - mu0 + 0.5, 1.0) - 0.5 + mu0
+
         return jnp.concatenate((A_swapped, mu_swapped, sigma_swapped))
 
     def peak_similarity(self, A1, mu1, sigma1, A2, mu2, sigma2):
@@ -756,6 +759,15 @@ class EdepTemplateSampler(TemplateSampler):
         tau_lo, logprior_lo = super()._samples_to_phys(x[: 3 * self.npeaks])
         tau_hi, logprior_hi = super()._samples_to_phys(x[3 * self.npeaks :])
 
+        # High-energy peak locations are centered on mu0_lo by _samples_to_phys
+        # so we need to correct this
+        mu0_lo = self.tau_0[self.npeaks : 2 * self.npeaks]
+        mu0_hi = self.tau_0[4 * self.npeaks : 5 * self.npeaks]
+        mu_hi = tau_hi[self.npeaks : 2 * self.npeaks] + (mu0_hi - mu0_lo)
+
+        for p in range(self.npeaks):
+            tau_hi.at[self.npeaks + p].set(mu_hi[p])
+
         tau = jnp.concatenate((tau_lo, tau_hi))
 
         return tau, logprior_lo + logprior_hi
@@ -781,6 +793,108 @@ class EdepTemplateSampler(TemplateSampler):
         x = jnp.concatenate((x_lo, x_hi))
 
         return x
+
+    def unswap_peaks(self, tau):
+
+        K = self.npeaks
+
+        # Indices of all pairs of peaks (including matching pairs)
+        peak1, peak2 = jnp.triu_indices(K)
+
+        A_lo = tau[:K]
+        mu_lo = tau[K : 2 * K]
+        sigma_lo = tau[2 * K : 3 * K]
+
+        A0_lo = self.tau_0[:K]
+        mu0_lo = self.tau_0[K : 2 * K]
+        sigma0_lo = self.tau_0[2 * K : 3 * K]
+
+        A_hi = tau[3 * K : 4 * K]
+        mu_hi = tau[4 * K : 5 * K]
+        sigma_hi = tau[5 * K : 6 * K]
+
+        A0_hi = self.tau_0[3 * K : 4 * K]
+        mu0_hi = self.tau_0[4 * K : 5 * K]
+        sigma0_hi = self.tau_0[5 * K : 6 * K]
+
+        logL_swap = (
+            self.peak_similarity(
+                A0_lo[peak1],
+                mu0_lo[peak1],
+                sigma0_lo[peak1],
+                A_lo[peak2],
+                mu_lo[peak2],
+                sigma_lo[peak2],
+            )
+            + self.peak_similarity(
+                A0_lo[peak2],
+                mu0_lo[peak2],
+                sigma0_lo[peak2],
+                A_lo[peak1],
+                mu_lo[peak1],
+                sigma_lo[peak1],
+            )
+            + self.peak_similarity(
+                A0_hi[peak1],
+                mu0_hi[peak1],
+                sigma0_hi[peak1],
+                A_hi[peak2],
+                mu_hi[peak2],
+                sigma_hi[peak2],
+            )
+            + self.peak_similarity(
+                A0_hi[peak2],
+                mu0_hi[peak2],
+                sigma0_hi[peak2],
+                A_hi[peak1],
+                mu_hi[peak1],
+                sigma_hi[peak1],
+            )
+        )
+
+        swap_idx = jnp.argmax(logL_swap)
+
+        peak1_swap = peak1[swap_idx]
+        peak2_swap = peak2[swap_idx]
+
+        A_lo_swapped = A_lo.copy()
+        A_lo_swapped = A_lo_swapped.at[peak1_swap].set(A_lo[peak2_swap])
+        A_lo_swapped = A_lo_swapped.at[peak2_swap].set(A_lo[peak1_swap])
+
+        mu_lo_swapped = mu_lo.copy()
+        mu_lo_swapped = mu_lo_swapped.at[peak1_swap].set(mu_lo[peak2_swap])
+        mu_lo_swapped = mu_lo_swapped.at[peak2_swap].set(mu_lo[peak1_swap])
+
+        sigma_lo_swapped = sigma_lo.copy()
+        sigma_lo_swapped = sigma_lo_swapped.at[peak1_swap].set(sigma_lo[peak2_swap])
+        sigma_lo_swapped = sigma_lo_swapped.at[peak2_swap].set(sigma_lo[peak1_swap])
+
+        A_hi_swapped = A_hi.copy()
+        A_hi_swapped = A_hi_swapped.at[peak1_swap].set(A_hi[peak2_swap])
+        A_hi_swapped = A_hi_swapped.at[peak2_swap].set(A_hi[peak1_swap])
+
+        mu_hi_swapped = mu_hi.copy()
+        mu_hi_swapped = mu_hi_swapped.at[peak1_swap].set(mu_hi[peak2_swap])
+        mu_hi_swapped = mu_hi_swapped.at[peak2_swap].set(mu_hi[peak1_swap])
+
+        sigma_hi_swapped = sigma_hi.copy()
+        sigma_hi_swapped = sigma_hi_swapped.at[peak1_swap].set(sigma_hi[peak2_swap])
+        sigma_hi_swapped = sigma_hi_swapped.at[peak2_swap].set(sigma_hi[peak1_swap])
+
+        # Ensure peak locations are still within bounds after swapping
+        mu_lo_swapped = jnp.mod(mu_lo_swapped - mu0_lo + 0.5, 1.0) - 0.5 + mu0_lo
+        mu_hi_swapped = jnp.mod(mu_hi_swapped - mu0_hi + 0.5, 1.0) - 0.5 + mu0_hi
+
+        return jnp.concatenate(
+            (
+                A_lo_swapped,
+                mu_lo_swapped,
+                sigma_lo_swapped,
+                A_hi_swapped,
+                mu_hi_swapped,
+                sigma_hi_swapped,
+            )
+        )
 
 
 class LatentVariableSampler(object):

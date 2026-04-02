@@ -1068,6 +1068,8 @@ class Gibbs(object):
             tau, key = self.tau_sampler.setup_sampler(jphi - phase_shifts, key)
             print()
 
+            self.tau_sampler.tau_0 = tau
+
         if self.nhyp > 0:
             print("Re-optimising timing model with burnt-in template")
             for it in range(100):
@@ -1181,16 +1183,19 @@ class Gibbs(object):
             state, samples = gibbs_sampling_loop(state, keys[c % update])
 
             tau = samples[0]
+            if np.any(np.isnan(tau)):
+                raise ValueError("Error: found a NaN in the template samples")
+
             if self.nhyp > 0:
                 hyp = samples[1]
                 theta = samples[2]
                 if np.any(np.isnan(hyp)):
-                    raise ValueError("Error: found a NaN in the samples")
+                    raise ValueError("Error: found a NaN in the hyperparameter samples")
             else:
                 theta = samples[1]
 
-            if np.any(np.isnan(theta)) or np.any(np.isnan(tau)):
-                raise ValueError("Error: found a NaN in the samples")
+            if np.any(np.isnan(theta)):
+                raise ValueError("Error: found a NaN in the timing samples")
 
             logL = samples[-1]
 
