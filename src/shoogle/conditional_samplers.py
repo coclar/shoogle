@@ -492,10 +492,17 @@ class TemplateSampler(object):
         mu0 = self.tau_0[K : 2 * K]
         sigma0 = self.tau_0[2 * K : 3 * K]
 
-        logL_swap = self.peak_similarity(
-            A0[peak1], mu0[peak1], sigma0[peak1], A[peak2], mu[peak2], sigma[peak2]
-        ) + self.peak_similarity(
-            A0[peak2], mu0[peak2], sigma0[peak2], A[peak1], mu[peak1], sigma[peak1]
+        logL_unswapped = self.peak_similarity(A0, mu0, sigma0, A, mu, sigma)
+
+        logL_swap = (
+            self.peak_similarity(
+                A0[peak1], mu0[peak1], sigma0[peak1], A[peak2], mu[peak2], sigma[peak2]
+            )
+            + self.peak_similarity(
+                A0[peak2], mu0[peak2], sigma0[peak2], A[peak1], mu[peak1], sigma[peak1]
+            )
+            - logL_unswapped[peak1]
+            - logL_unswapped[peak2]
         )
 
         swap_idx = jnp.argmax(logL_swap)
@@ -766,7 +773,7 @@ class EdepTemplateSampler(TemplateSampler):
         mu_hi = tau_hi[self.npeaks : 2 * self.npeaks] + (mu0_hi - mu0_lo)
 
         for p in range(self.npeaks):
-            tau_hi.at[self.npeaks + p].set(mu_hi[p])
+            tau_hi = tau_hi.at[self.npeaks + p].set(mu_hi[p])
 
         tau = jnp.concatenate((tau_lo, tau_hi))
 
@@ -789,6 +796,13 @@ class EdepTemplateSampler(TemplateSampler):
 
         x_lo = super()._phys_to_samples(tau[: 3 * self.npeaks])
         x_hi = super()._phys_to_samples(tau[3 * self.npeaks :])
+
+        mu0_hi = self.tau_0[4 * self.npeaks : 5 * self.npeaks]
+        mu_hi = tau[4 * self.npeaks : 5 * self.npeaks]
+        xmu_hi = jax.scipy.special.logit(mu_hi - mu0_hi + 0.5)
+
+        for p in range(self.npeaks):
+            x_hi = x_hi.at[self.npeaks + p].set(xmu_hi[p])
 
         x = jnp.concatenate((x_lo, x_hi))
 
@@ -816,6 +830,10 @@ class EdepTemplateSampler(TemplateSampler):
         A0_hi = self.tau_0[3 * K : 4 * K]
         mu0_hi = self.tau_0[4 * K : 5 * K]
         sigma0_hi = self.tau_0[5 * K : 6 * K]
+
+        logL_unswapped = self.peak_similarity(
+            A0_lo, mu0_lo, sigma0_lo, A_lo, mu_lo, sigma_lo
+        ) + self.peak_similarity(A0_hi, mu0_hi, sigma0_hi, A_hi, mu_hi, sigma_hi)
 
         logL_swap = (
             self.peak_similarity(
@@ -850,6 +868,8 @@ class EdepTemplateSampler(TemplateSampler):
                 mu_hi[peak1],
                 sigma_hi[peak1],
             )
+            - logL_unswapped[peak1]
+            - logL_unswapped[peak2]
         )
 
         swap_idx = jnp.argmax(logL_swap)
