@@ -1068,8 +1068,6 @@ class Gibbs(object):
             tau, key = self.tau_sampler.setup_sampler(jphi - phase_shifts, key)
             print()
 
-            self.tau_sampler.tau_0 = tau
-
         if self.nhyp > 0:
             print("Re-optimising timing model with burnt-in template")
             for it in range(100):

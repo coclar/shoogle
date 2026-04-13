@@ -173,33 +173,23 @@ class GibbsResults(object):
             timing_parameter_values = reordered_param_values
             timing_parameter_uncertainties = reordered_param_uncertainties
 
-            for k in range(self.psr.npeaks):
-                mu = temp_template_chain[:, self.psr.npeaks + k]
-
-                # Peaks close to the wrap can jump either side, let's undo that
-                if np.std(mu) > 0.25:
-                    mu = np.mod(mu, 1.0)
-                    temp_template_chain[:, self.psr.npeaks + k] = mu
-
-                # If that didn't help, undo the undoing!
-                if np.std(mu) > 0.25:
-                    mu = np.mod(mu + 0.5, 1.0) - 0.5
-                    temp_template_chain[:, self.psr.npeaks + k] = mu
+            mu = temp_template_chain[:, self.psr.npeaks : 2 * self.psr.npeaks]
+            mu = np.mod(mu - np.mean(mu, axis=0) + 0.5, 1.0) - 0.5 + np.mean(mu, axis=0)
+            temp_template_chain[:, self.psr.npeaks : 2 * self.psr.npeaks] = mu
 
             if self.psr.Edep:
                 p0 = self.psr.npeaks * 3
-                for k in range(self.psr.npeaks):
-                    mu = temp_template_chain[:, p0 + self.psr.npeaks + k]
-
-                    # Peaks close to the wrap can jump either side, let's undo that
-                    if np.std(mu) > 0.25:
-                        mu = np.mod(mu, 1.0)
-                        temp_template_chain[:, p0 + self.psr.npeaks + k] = mu
-
-                    # If that didn't help, undo the undoing!
-                    if np.std(mu) > 0.25:
-                        mu = np.mod(mu + 0.5, 1.0) - 0.5
-                        temp_template_chain[:, p0 + self.psr.npeaks + k] = mu
+                mu = temp_template_chain[
+                    :, p0 + self.psr.npeaks : p0 + 2 * self.psr.npeaks
+                ]
+                mu = (
+                    np.mod(mu - np.mean(mu, axis=0) + 0.5, 1.0)
+                    - 0.5
+                    + np.mean(mu, axis=0)
+                )
+                temp_template_chain[
+                    :, p0 + self.psr.npeaks : p0 + 2 * self.psr.npeaks
+                ] = mu
 
             if decimated:
                 loglike_chain = np.append(loglike_chain, temp_loglike_chain, axis=0)

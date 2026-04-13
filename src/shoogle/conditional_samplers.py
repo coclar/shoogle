@@ -3,6 +3,7 @@ import jax
 from jax.scipy.linalg import cholesky, cho_solve, solve_triangular
 import jax.numpy as jnp
 import blackjax
+from optax.assignment import hungarian_algorithm
 from scipy.special import logit, expit
 from tqdm.auto import tqdm
 from astropy import units as u
@@ -146,8 +147,8 @@ class TemplateSampler(object):
         self.maxwraps = maxwraps
         self.wraps = jnp.arange(-2, 3)
 
-        self.minlogsigma = jnp.log(minsigma)
-        self.maxlogsigma = jnp.log(maxsigma)
+        self.minsigma_sq = minsigma**2
+        self.maxsigma_sq = maxsigma**2
         self.w = jnp.array(weights)
 
     def template(self, tau, phases):
@@ -274,17 +275,36 @@ class TemplateSampler(object):
             A = A.at[p].set(Bk[p] * U)
             U -= A[p]
 
-        dmu = jax.scipy.special.expit(x[self.npeaks : 2 * self.npeaks])
-        logprior += jnp.sum(jnp.log(dmu * (1 - dmu)))
+        # Uniform between 0, 1
+        ux = jax.scipy.special.expit(x[self.npeaks : 2 * self.npeaks])
+        uy = jax.scipy.special.expit(x[2 * self.npeaks : 3 * self.npeaks])
+        logprior += jnp.sum(jnp.log(ux * (1 - ux)))
+        logprior += jnp.sum(jnp.log(uy * (1 - uy)))
 
-        # Undo mapping from dmu = mu - mu0 + 0.5
-        mu0 = self.tau_0[self.npeaks : self.npeaks * 2]
-        mu = dmu - 0.5 + mu0
+        # 2D normal distribution
+        nx = jax.scipy.stats.norm.isf(ux)
+        ny = jax.scipy.stats.norm.isf(uy)
 
-        logsigma01 = jax.scipy.special.expit(x[2 * self.npeaks : 3 * self.npeaks])
-        logprior += jnp.sum(jnp.log(logsigma01 * (1 - logsigma01)))
-        sigma = jnp.exp(
-            logsigma01 * (self.maxlogsigma - self.minlogsigma) + self.minlogsigma
+        # Force it to be near the unit circle
+        # (avoids coordinate singularity at nx, ny = 0)
+        donut_sigma = 0.05
+        logprior += jnp.sum(-0.5 * (jnp.sqrt(nx**2 + ny**2) - 1) ** 2 / donut_sigma**2)
+
+        mu = jnp.arctan2(nx, ny) / (2 * jnp.pi)
+
+        sigmasq01 = jax.scipy.special.expit(x[3 * self.npeaks : 4 * self.npeaks])
+        logprior += jnp.sum(jnp.log(sigmasq01 * (1 - sigmasq01)))
+        sigma = jnp.sqrt(
+            sigmasq01 * (self.maxsigma_sq - self.minsigma_sq) + self.minsigma_sq
+        )
+
+        invgamma_beta = 1e-4
+        invgamma_alpha = 0.4
+        logprior += jnp.sum(
+            invgamma_alpha * jnp.log(invgamma_beta)
+            - jax.scipy.special.gammaln(invgamma_alpha)
+            - (invgamma_alpha + 1) * jnp.log(sigma**2)
+            - invgamma_beta / sigma**2
         )
 
         return jnp.concatenate((A, mu, sigma)), logprior
@@ -374,16 +394,18 @@ class TemplateSampler(object):
             U -= A[p]
 
         # Uniform prior on log(sigma), transformed to (0,1)
-        logsigma01 = (jnp.log(sigma) - self.minlogsigma) / (
-            self.maxlogsigma - self.minlogsigma
+        sigmasq01 = (sigma**2 - self.minsigma_sq) / (
+            self.maxsigma_sq - self.minsigma_sq
         )
 
-        # We'll take dmu = mu - mu0, then add 0.5,
-        # so dmu in (-0.5, 0.5) maps to (0, 1) for logit transform
-        mu0 = self.tau_0[self.npeaks : self.npeaks * 2]
+        nx = jnp.sin(2 * jnp.pi * mu)
+        ny = jnp.cos(2 * jnp.pi * mu)
+
+        ux = jax.scipy.stats.norm.sf(nx)
+        uy = jax.scipy.stats.norm.sf(ny)
 
         # then logit transformed -> (-inf,inf)
-        x = jax.scipy.special.logit(jnp.concatenate((Bk, mu - mu0 + 0.5, logsigma01)))
+        x = jax.scipy.special.logit(jnp.concatenate((Bk, ux, uy, sigmasq01)))
 
         return x
 
@@ -402,40 +424,83 @@ class TemplateSampler(object):
 
         logprob_fn = lambda x: self._log_post(x, phases)
 
-        warmup = blackjax.window_adaptation(
-            blackjax.nuts, logprob_fn, progress_bar=True
-        )
-
         x0 = self._phys_to_samples(self.tau_0)
 
         warmup_key, sample_key = jax.random.split(rng_key, 2)
-        (state, parameters), _ = warmup.run(warmup_key, x0, num_steps=2000)
 
-        self.nuts_params = parameters
-        self.logprob_fn = jax.jit(self._log_post)
-        self.sample_key = sample_key
+        step_fn = blackjax.nuts.build_kernel(
+            integrator=blackjax.mcmc.integrators.yoshida
+        )
 
-        logprob_fn = lambda x: self._log_post(x, phases)
+        @jax.jit
+        def inv_hess_diag(x, phases):
 
-        step_fn = blackjax.nuts.build_kernel()
+            grad = lambda x: jax.grad(self._log_post, argnums=0)(x, phases)
+
+            def d2f_dxi2(i):
+                v = jnp.zeros_like(x).at[i].set(1.0)
+                _, hi = jax.jvp(grad, (x,), (v,))
+                return hi[i]
+
+            Hdiag = jax.vmap(d2f_dxi2, in_axes=0, out_axes=0)(jnp.arange(len(x)))
+
+            return jnp.clip(1.0 / jnp.abs(Hdiag), 0, 1e-2)
+
+        def kernel_generator(step_size):
+
+            def kernel(rng_key, state):
+
+                IMM = inv_hess_diag(state.position, phases)
+
+                logprob_fn = lambda x: self._log_post(x, phases)
+
+                return step_fn(
+                    rng_key=rng_key,
+                    state=state,
+                    logdensity_fn=logprob_fn,
+                    step_size=step_size,
+                    max_num_doublings=10,
+                    inverse_mass_matrix=IMM,
+                )
+
+            return kernel
+
+        state = blackjax.mcmc.hmc.HMCState(
+            position=x0,
+            logdensity=self._log_post(x0, phases),
+            logdensity_grad=jax.grad(self._log_post, argnums=0)(x0, phases),
+        )
+
+        step_size_opt = blackjax.adaptation.step_size.find_reasonable_step_size(
+            warmup_key,
+            kernel_generator,
+            state,
+            initial_step_size=0.1,
+            target_accept=0.95,
+        )
+
+        print(step_size_opt)
 
         @jax.jit
         def kernel(rng_key, state, phases):
+
+            IMM = inv_hess_diag(state.position, phases)
 
             logprob_fn = lambda x: self._log_post(x, phases)
             state, _ = step_fn(
                 rng_key=rng_key,
                 state=state,
                 logdensity_fn=logprob_fn,
-                **self.nuts_params,
+                step_size=step_size_opt / 2,
+                inverse_mass_matrix=IMM,
+                max_num_doublings=15,
             )
 
             return state, (self._samples_to_phys(state.position)[0], state.logdensity)
 
         self.kernel = kernel
-        tau, logprior = self._samples_to_phys(state.position)
 
-        return tau, sample_key
+        return self.tau_0, sample_key
 
     def sample(self, tau, phases, key, num_samples=1000):
         """
@@ -467,7 +532,10 @@ class TemplateSampler(object):
 
         x0 = self._phys_to_samples(tau)
 
-        logprob_fn = lambda x: self.logprob_fn(x, phases)
+        # Make sure starting point isn't too close to a boundary
+        x0 = jnp.clip(x0, -10, 10)
+
+        logprob_fn = lambda x: self._log_post(x, phases)
         state = blackjax.nuts.init(x0, logprob_fn)
 
         one_step = lambda state, key: self.kernel(key, state, phases)
@@ -482,7 +550,7 @@ class TemplateSampler(object):
         K = self.npeaks
 
         # Indices of all pairs of peaks (including matching pairs)
-        peak1, peak2 = jnp.triu_indices(K)
+        peak1, peak2 = jnp.triu_indices(K, -K)
 
         A = tau[:K]
         mu = tau[K : 2 * K]
@@ -492,38 +560,20 @@ class TemplateSampler(object):
         mu0 = self.tau_0[K : 2 * K]
         sigma0 = self.tau_0[2 * K : 3 * K]
 
-        logL_unswapped = self.peak_similarity(A0, mu0, sigma0, A, mu, sigma)
-
-        logL_swap = (
-            self.peak_similarity(
-                A0[peak1], mu0[peak1], sigma0[peak1], A[peak2], mu[peak2], sigma[peak2]
-            )
-            + self.peak_similarity(
-                A0[peak2], mu0[peak2], sigma0[peak2], A[peak1], mu[peak1], sigma[peak1]
-            )
-            - logL_unswapped[peak1]
-            - logL_unswapped[peak2]
+        logL_matrix = self.peak_similarity(
+            A0[None, :],
+            mu0[None, :],
+            sigma0[None, :],
+            A[None, :],
+            mu[None, :],
+            sigma[None, :],
         )
 
-        swap_idx = jnp.argmax(logL_swap)
+        i, j = hungarian_algorithm(-logL_matrix)
 
-        peak1_swap = peak1[swap_idx]
-        peak2_swap = peak2[swap_idx]
-
-        A_swapped = A.copy()
-        A_swapped = A_swapped.at[peak1_swap].set(A[peak2_swap])
-        A_swapped = A_swapped.at[peak2_swap].set(A[peak1_swap])
-
-        mu_swapped = mu.copy()
-        mu_swapped = mu_swapped.at[peak1_swap].set(mu[peak2_swap])
-        mu_swapped = mu_swapped.at[peak2_swap].set(mu[peak1_swap])
-
-        sigma_swapped = sigma.copy()
-        sigma_swapped = sigma_swapped.at[peak1_swap].set(sigma[peak2_swap])
-        sigma_swapped = sigma_swapped.at[peak2_swap].set(sigma[peak1_swap])
-
-        # Ensure peak locations are still within bounds after swapping
-        mu_swapped = jnp.mod(mu_swapped - mu0 + 0.5, 1.0) - 0.5 + mu0
+        A_swapped = A.at[i].set(A[j])
+        mu_swapped = mu.at[i].set(mu[j])
+        sigma_swapped = sigma.at[i].set(sigma[j])
 
         return jnp.concatenate((A_swapped, mu_swapped, sigma_swapped))
 
@@ -532,24 +582,14 @@ class TemplateSampler(object):
         diff = jnp.abs(mu1 - mu2)
         diff = jnp.minimum(diff, 1 - diff)
 
-        KL_12 = 0.5 * (
-            (sigma1 / sigma2) ** 2
-            + diff**2 / sigma1**2
-            - 1
-            - jnp.log(sigma1**2 / sigma2**2)
-        )
-        KL_21 = 0.5 * (
-            (sigma2 / sigma1) ** 2
-            + diff**2 / sigma2**2
-            - 1
-            - jnp.log(sigma2**2 / sigma1**2)
-        )
-
-        entropy_1 = 0.5 * jnp.log(2 * jnp.pi * jnp.exp(1) * sigma1**2)
-        entropy_2 = 0.5 * jnp.log(2 * jnp.pi * jnp.exp(1) * sigma2**2)
-
-        logL = A1 * (entropy_1 - KL_12 + jnp.log(A2)) + A2 * (
-            entropy_2 - KL_21 + jnp.log(A1)
+        logL = A1 * (
+            jnp.log(A2)
+            - jnp.log(sigma2)
+            - 0.5 * (diff**2 / sigma2**2 + sigma1**2 / sigma2**2 + jnp.log(2 * jnp.pi))
+        ) + A2 * (
+            jnp.log(A1)
+            - jnp.log(sigma1)
+            - 0.5 * (diff**2 / sigma1**2 + sigma2**2 / sigma1**2 + jnp.log(2 * jnp.pi))
         )
 
         return logL
@@ -716,11 +756,25 @@ class EdepTemplateSampler(TemplateSampler):
         tau_lo = tau[: 3 * self.npeaks]
         tau_hi = tau[3 * self.npeaks :]
 
-        tau_E = tau_lo[None, :] + log10E_frac[:, None] * (tau_hi - tau_lo)[None, :]
+        A_lo = tau_lo[: self.npeaks]
+        A_hi = tau_hi[: self.npeaks]
 
-        A_E = tau_E[:, : self.npeaks]
-        mu_E = tau_E[:, self.npeaks : 2 * self.npeaks]
-        sigma_E = tau_E[:, 2 * self.npeaks : 3 * self.npeaks]
+        # Ensure peak centres always shift the shortest way around the circle
+        mu_lo = tau_lo[self.npeaks : 2 * self.npeaks]
+        mu_hi = tau_hi[self.npeaks : 2 * self.npeaks]
+        mu_lo_wrapped = jnp.mod(mu_lo - mu_hi + 0.5, 1.0) - 0.5 + mu_hi
+
+        sigma_lo = tau_lo[2 * self.npeaks :]
+        sigma_hi = tau_hi[2 * self.npeaks :]
+
+        A_E = A_lo[None, :] + log10E_frac[:, None] * (A_hi - A_lo)[None, :]
+        mu_E = (
+            mu_lo_wrapped[None, :]
+            + log10E_frac[:, None] * (mu_hi - mu_lo_wrapped)[None, :]
+        )
+        sigma_E = (
+            sigma_lo[None, :] + log10E_frac[:, None] * (sigma_hi - sigma_lo)[None, :]
+        )
 
         U_E = 1.0 - jnp.sum(A_E, axis=1)
 
@@ -763,17 +817,8 @@ class EdepTemplateSampler(TemplateSampler):
                        and the Jacobian of the logit transforms.
         """
 
-        tau_lo, logprior_lo = super()._samples_to_phys(x[: 3 * self.npeaks])
-        tau_hi, logprior_hi = super()._samples_to_phys(x[3 * self.npeaks :])
-
-        # High-energy peak locations are centered on mu0_lo by _samples_to_phys
-        # so we need to correct this
-        mu0_lo = self.tau_0[self.npeaks : 2 * self.npeaks]
-        mu0_hi = self.tau_0[4 * self.npeaks : 5 * self.npeaks]
-        mu_hi = tau_hi[self.npeaks : 2 * self.npeaks] + (mu0_hi - mu0_lo)
-
-        for p in range(self.npeaks):
-            tau_hi = tau_hi.at[self.npeaks + p].set(mu_hi[p])
+        tau_lo, logprior_lo = super()._samples_to_phys(x[: 4 * self.npeaks])
+        tau_hi, logprior_hi = super()._samples_to_phys(x[4 * self.npeaks :])
 
         tau = jnp.concatenate((tau_lo, tau_hi))
 
@@ -797,13 +842,6 @@ class EdepTemplateSampler(TemplateSampler):
         x_lo = super()._phys_to_samples(tau[: 3 * self.npeaks])
         x_hi = super()._phys_to_samples(tau[3 * self.npeaks :])
 
-        mu0_hi = self.tau_0[4 * self.npeaks : 5 * self.npeaks]
-        mu_hi = tau[4 * self.npeaks : 5 * self.npeaks]
-        xmu_hi = jax.scipy.special.logit(mu_hi - mu0_hi + 0.5)
-
-        for p in range(self.npeaks):
-            x_hi = x_hi.at[self.npeaks + p].set(xmu_hi[p])
-
         x = jnp.concatenate((x_lo, x_hi))
 
         return x
@@ -813,8 +851,6 @@ class EdepTemplateSampler(TemplateSampler):
         K = self.npeaks
 
         # Indices of all pairs of peaks (including matching pairs)
-        peak1, peak2 = jnp.triu_indices(K)
-
         A_lo = tau[:K]
         mu_lo = tau[K : 2 * K]
         sigma_lo = tau[2 * K : 3 * K]
@@ -831,79 +867,31 @@ class EdepTemplateSampler(TemplateSampler):
         mu0_hi = self.tau_0[4 * K : 5 * K]
         sigma0_hi = self.tau_0[5 * K : 6 * K]
 
-        logL_unswapped = self.peak_similarity(
-            A0_lo, mu0_lo, sigma0_lo, A_lo, mu_lo, sigma_lo
-        ) + self.peak_similarity(A0_hi, mu0_hi, sigma0_hi, A_hi, mu_hi, sigma_hi)
-
-        logL_swap = (
-            self.peak_similarity(
-                A0_lo[peak1],
-                mu0_lo[peak1],
-                sigma0_lo[peak1],
-                A_lo[peak2],
-                mu_lo[peak2],
-                sigma_lo[peak2],
-            )
-            + self.peak_similarity(
-                A0_lo[peak2],
-                mu0_lo[peak2],
-                sigma0_lo[peak2],
-                A_lo[peak1],
-                mu_lo[peak1],
-                sigma_lo[peak1],
-            )
-            + self.peak_similarity(
-                A0_hi[peak1],
-                mu0_hi[peak1],
-                sigma0_hi[peak1],
-                A_hi[peak2],
-                mu_hi[peak2],
-                sigma_hi[peak2],
-            )
-            + self.peak_similarity(
-                A0_hi[peak2],
-                mu0_hi[peak2],
-                sigma0_hi[peak2],
-                A_hi[peak1],
-                mu_hi[peak1],
-                sigma_hi[peak1],
-            )
-            - logL_unswapped[peak1]
-            - logL_unswapped[peak2]
+        logL_matrix = self.peak_similarity(
+            A0_lo[:, None],
+            mu0_lo[:, None],
+            sigma0_lo[:, None],
+            A_lo[None, :],
+            mu_lo[None, :],
+            sigma_lo[None, :],
+        ) + self.peak_similarity(
+            A0_hi[:, None],
+            mu0_hi[:, None],
+            sigma0_hi[:, None],
+            A_hi[None, :],
+            mu_hi[None, :],
+            sigma_hi[None, :],
         )
 
-        swap_idx = jnp.argmax(logL_swap)
+        i, j = hungarian_algorithm(-logL_matrix)
 
-        peak1_swap = peak1[swap_idx]
-        peak2_swap = peak2[swap_idx]
+        A_lo_swapped = A_lo.at[i].set(A_lo[j])
+        mu_lo_swapped = mu_lo.at[i].set(mu_lo[j])
+        sigma_lo_swapped = sigma_lo.at[i].set(sigma_lo[j])
 
-        A_lo_swapped = A_lo.copy()
-        A_lo_swapped = A_lo_swapped.at[peak1_swap].set(A_lo[peak2_swap])
-        A_lo_swapped = A_lo_swapped.at[peak2_swap].set(A_lo[peak1_swap])
-
-        mu_lo_swapped = mu_lo.copy()
-        mu_lo_swapped = mu_lo_swapped.at[peak1_swap].set(mu_lo[peak2_swap])
-        mu_lo_swapped = mu_lo_swapped.at[peak2_swap].set(mu_lo[peak1_swap])
-
-        sigma_lo_swapped = sigma_lo.copy()
-        sigma_lo_swapped = sigma_lo_swapped.at[peak1_swap].set(sigma_lo[peak2_swap])
-        sigma_lo_swapped = sigma_lo_swapped.at[peak2_swap].set(sigma_lo[peak1_swap])
-
-        A_hi_swapped = A_hi.copy()
-        A_hi_swapped = A_hi_swapped.at[peak1_swap].set(A_hi[peak2_swap])
-        A_hi_swapped = A_hi_swapped.at[peak2_swap].set(A_hi[peak1_swap])
-
-        mu_hi_swapped = mu_hi.copy()
-        mu_hi_swapped = mu_hi_swapped.at[peak1_swap].set(mu_hi[peak2_swap])
-        mu_hi_swapped = mu_hi_swapped.at[peak2_swap].set(mu_hi[peak1_swap])
-
-        sigma_hi_swapped = sigma_hi.copy()
-        sigma_hi_swapped = sigma_hi_swapped.at[peak1_swap].set(sigma_hi[peak2_swap])
-        sigma_hi_swapped = sigma_hi_swapped.at[peak2_swap].set(sigma_hi[peak1_swap])
-
-        # Ensure peak locations are still within bounds after swapping
-        mu_lo_swapped = jnp.mod(mu_lo_swapped - mu0_lo + 0.5, 1.0) - 0.5 + mu0_lo
-        mu_hi_swapped = jnp.mod(mu_hi_swapped - mu0_hi + 0.5, 1.0) - 0.5 + mu0_hi
+        A_hi_swapped = A_hi.at[i].set(A_hi[j])
+        mu_hi_swapped = mu_hi.at[i].set(mu_hi[j])
+        sigma_hi_swapped = sigma_hi.at[i].set(sigma_hi[j])
 
         return jnp.concatenate(
             (
@@ -1743,14 +1731,19 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         logprob_fn = lambda x: self.log_post(x, MT_Sigma_inv_M, MT_Sigma_inv_R)
 
         warmup = blackjax.window_adaptation(
-            blackjax.nuts, logprob_fn, progress_bar=True
+            blackjax.nuts,
+            logprob_fn,
+            progress_bar=True,
+            target_acceptance_rate=0.9,
+            is_mass_matrix_diagonal=False,
+            max_num_doublings=15,
+            integrator=blackjax.mcmc.integrators.yoshida,
         )
 
         warmup_key, sample_key = jax.random.split(rng_key, 2)
         (state, parameters), _ = warmup.run(warmup_key, x0, num_steps=2000)
 
         self.nuts_params = parameters
-        self.sample_key = sample_key
 
         step_fn = blackjax.nuts.build_kernel()
 
@@ -1768,9 +1761,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
             return state, (self._samples_to_phys(state.position)[0], state.logdensity)
 
         self.logprob_fn = jax.jit(self.log_post)
-
         self.kernel = kernel
-        # hyp, logprior = state.position
 
         return self._samples_to_phys(state.position)[0], sample_key
 
