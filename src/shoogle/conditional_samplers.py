@@ -561,9 +561,9 @@ class TemplateSampler(object):
         sigma0 = self.tau_0[2 * K : 3 * K]
 
         logL_matrix = self.peak_similarity(
-            A0[None, :],
-            mu0[None, :],
-            sigma0[None, :],
+            A0[:, None],
+            mu0[:, None],
+            sigma0[:, None],
             A[None, :],
             mu[None, :],
             sigma[None, :],
@@ -963,7 +963,28 @@ class LatentVariableSampler(object):
         tau_lo = tau[: 3 * self.npeaks]
         tau_hi = tau[3 * self.npeaks :]
 
-        tau_E = tau_lo[None, :] + self.log10E_frac[:, None] * (tau_hi - tau_lo)[None, :]
+        A_lo = tau_lo[: self.npeaks]
+        A_hi = tau_hi[: self.npeaks]
+
+        # Ensure peak centres always shift the shortest way around the circle
+        mu_lo = tau_lo[self.npeaks : 2 * self.npeaks]
+        mu_hi = tau_hi[self.npeaks : 2 * self.npeaks]
+        mu_lo_wrapped = jnp.mod(mu_lo - mu_hi + 0.5, 1.0) - 0.5 + mu_hi
+
+        sigma_lo = tau_lo[2 * self.npeaks :]
+        sigma_hi = tau_hi[2 * self.npeaks :]
+
+        A_E = A_lo[None, :] + self.log10E_frac[:, None] * (A_hi - A_lo)[None, :]
+        mu_E = (
+            mu_lo_wrapped[None, :]
+            + self.log10E_frac[:, None] * (mu_hi - mu_lo_wrapped)[None, :]
+        )
+        sigma_E = (
+            sigma_lo[None, :]
+            + self.log10E_frac[:, None] * (sigma_hi - sigma_lo)[None, :]
+        )
+
+        tau_E = jnp.concatenate((A_E, mu_E, sigma_E), axis=1)
 
         return tau_E
 
