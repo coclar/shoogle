@@ -479,8 +479,6 @@ class TemplateSampler(object):
             target_accept=0.95,
         )
 
-        print(step_size_opt)
-
         @jax.jit
         def kernel(rng_key, state, phases):
 
@@ -491,7 +489,7 @@ class TemplateSampler(object):
                 rng_key=rng_key,
                 state=state,
                 logdensity_fn=logprob_fn,
-                step_size=step_size_opt / 2,
+                step_size=0.5,
                 inverse_mass_matrix=IMM,
                 max_num_doublings=15,
             )
@@ -1766,7 +1764,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
         self.nuts_params = parameters
 
-        step_fn = blackjax.nuts.build_kernel()
+        step_fn = blackjax.nuts.build_kernel(blackjax.mcmc.integrators.yoshida)
 
         @jax.jit
         def kernel(rng_key, state, MT_Sigma_inv_M, MT_Sigma_inv_R):
