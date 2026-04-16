@@ -2,6 +2,7 @@ import numpy as np
 import jax
 from jax.scipy.linalg import cholesky, cho_solve, solve_triangular
 import jax.numpy as jnp
+from jaxopt import LBFGS
 import blackjax
 from optax.assignment import hungarian_algorithm
 from scipy.special import logit, expit
@@ -423,8 +424,19 @@ class TemplateSampler(object):
         """
 
         logprob_fn = lambda x: self._log_post(x, phases)
+        neg_logprob_fn = lambda x: -self._log_post(x, phases)
 
         x0 = self._phys_to_samples(self.tau_0)
+        logpost0 = -neg_logprob_fn(x0)
+        loglike0 = self._log_like(self.tau_0, phases)
+
+        optimiser = LBFGS(neg_logprob_fn)
+        res = optimiser.run(x0)
+
+        x0 = res.params
+        self.tau_0 = self._samples_to_phys(x0)[0]
+        print("Optimising template:", logpost0, "->", -neg_logprob_fn(x0))
+        print("log-likelihoods:", loglike0, "->", self._log_like(self.tau_0, phases))
 
         warmup_key, sample_key = jax.random.split(rng_key, 2)
 
@@ -1754,37 +1766,40 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
             logprob_fn,
             progress_bar=True,
             target_acceptance_rate=0.9,
-            is_mass_matrix_diagonal=False,
+            is_mass_matrix_diagonal=True,
             max_num_doublings=15,
             integrator=blackjax.mcmc.integrators.yoshida,
         )
 
         warmup_key, sample_key = jax.random.split(rng_key, 2)
-        (state, parameters), _ = warmup.run(warmup_key, x0, num_steps=2000)
+        (state, parameters), info = warmup.run(warmup_key, x0, num_steps=2000)
 
         self.nuts_params = parameters
+        print(info)
 
         step_fn = blackjax.nuts.build_kernel(blackjax.mcmc.integrators.yoshida)
 
         @jax.jit
-        def kernel(rng_key, state, MT_Sigma_inv_M, MT_Sigma_inv_R):
+        def kernel(rng_key, state, MT_Sigma_inv_M, MT_Sigma_inv_R, step_size):
 
             logprob_fn = lambda x: self.log_post(x, MT_Sigma_inv_M, MT_Sigma_inv_R)
-            state, _ = step_fn(
+            state, info = step_fn(
                 rng_key=rng_key,
                 state=state,
                 logdensity_fn=logprob_fn,
-                **self.nuts_params,
+                inverse_mass_matrix=self.nuts_params["inverse_mass_matrix"],
+                max_num_doublings=self.nuts_params["max_num_doublings"],
+                step_size=step_size,
             )
 
-            return state, (self._samples_to_phys(state.position)[0], state.logdensity)
+            return state, info
 
         self.logprob_fn = jax.jit(self.log_post)
         self.kernel = kernel
 
         return self._samples_to_phys(state.position)[0], sample_key
 
-    def sample(self, hyp, mu_z, sigma_z, key, num_samples=1000):
+    def sample(self, hyp, mu_z, sigma_z, key, step_size, num_samples=1000):
         """
         Run the blackjax NUTS sampler to estimate hyperparameters
 
@@ -1819,13 +1834,43 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         state = blackjax.nuts.init(x, logprob_fn)
 
         one_step = lambda state, key: self.kernel(
-            key, state, MT_Sigma_inv_M, MT_Sigma_inv_R
+            key, state, MT_Sigma_inv_M, MT_Sigma_inv_R, step_size
         )
         hyp_keys = jax.random.split(key, num_samples + 1)
 
-        _, samples = jax.lax.scan(one_step, state, hyp_keys[:-1])
+        state, infos = jax.lax.scan(one_step, state, hyp_keys[:-1])
+        loop_state = (state, hyp_keys[-1], step_size, infos)
+        diverged0 = infos.is_divergent[-1]
+        accept0 = infos.acceptance_rate[-1]
 
-        return samples, hyp_keys[-1]
+        def diverged(loop_state):
+            infos = loop_state[-1]
+            step_size = loop_state[2]
+
+            return (infos.is_divergent[-1] | (infos.acceptance_rate[-1] < 0.2)) & (
+                step_size > self.nuts_params["step_size"] / 16
+            )
+
+        def body_fun(loop_state):
+            state = loop_state[0]
+            key = loop_state[1]
+            keys = jax.random.split(key, num_samples + 1)
+            step_size = loop_state[2] / 2.0
+
+            one_step = lambda state, key: self.kernel(
+                key, state, MT_Sigma_inv_M, MT_Sigma_inv_R, step_size
+            )
+            state, infos = jax.lax.scan(one_step, state, keys[:-1])
+
+            return (state, keys[-1], step_size, infos)
+
+        state, key, step_size, infos = jax.lax.while_loop(
+            diverged, body_fun, loop_state
+        )
+
+        sample = self._samples_to_phys(state.position)[0]
+
+        return sample, hyp_keys[-1], accept0, diverged0, step_size
 
     def sample_lambda_theta_given_tau_zm(self, hyp, mu_z, sigma_z, key, num_steps=10):
         """
@@ -1866,9 +1911,11 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
         """
 
-        hyp_samples, key = self.sample(hyp, mu_z, sigma_z, key, num_steps)
+        step_size = self.nuts_params["step_size"]
+        new_hyp, key, divergent, diverged0, step_size = self.sample(
+            hyp, mu_z, sigma_z, key, step_size, num_steps
+        )
 
-        new_hyp = hyp_samples[0][-1]
         all_hyp = self._fill_noise_pars(new_hyp)
         inv_prior_cov = self._make_psd_cov(all_hyp)
 
@@ -1876,4 +1923,4 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
             mu_z, sigma_z, inv_prior_cov, key
         )
 
-        return new_hyp, theta, phase_shifts, key
+        return new_hyp, theta, phase_shifts, key, divergent, diverged0, step_size

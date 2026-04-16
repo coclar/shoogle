@@ -949,7 +949,7 @@ class Gibbs(object):
 
         # Make sure template is phase-aligned with the data
         logL_max = 0
-        for dphi in np.arange(-0.5, 0.5, 0.001):
+        for dphi in np.arange(-0.5, 0.5, 0.0001):
             tau = np.copy(self.tau_sampler.tau_0)
             tau[self.npeaks : 2 * self.npeaks] += dphi
             tau[self.npeaks : 2 * self.npeaks] = np.mod(
@@ -1103,14 +1103,22 @@ class Gibbs(object):
                 mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
                     tau, jphi - phase_shifts, key
                 )
-                hyp, theta, phase_shifts, key = (
+                hyp, theta, phase_shifts, key, divergent, diverged0, step_size = (
                     self.timing_sampler.sample_lambda_theta_given_tau_zm(
                         hyp, mu_z, sigma_z, key, num_NUTS_steps
                     )
                 )
                 logL = self.tau_sampler._log_like(tau, jphi - phase_shifts)
 
-                return (phase_shifts, tau, hyp), (tau, hyp, theta, logL)
+                return (phase_shifts, tau, hyp), (
+                    tau,
+                    hyp,
+                    theta,
+                    logL,
+                    divergent,
+                    diverged0,
+                    step_size,
+                )
 
         else:
             state = (phase_shifts, tau)
@@ -1187,15 +1195,31 @@ class Gibbs(object):
             if self.nhyp > 0:
                 hyp = samples[1]
                 theta = samples[2]
+                logL = samples[3]
+                accept0 = samples[4]
+                diverged0 = samples[5]
+                step_size = samples[6]
+
+                if plots:
+                    if diverged0 or (accept0 < 0.2):
+                        print("Rejected", accept0, diverged0)
+                        print("Hyp:", hyp)
+                        print(
+                            "Final step size:",
+                            step_size,
+                            "(",
+                            self.timing_sampler.nuts_params["step_size"],
+                            ")",
+                        )
+
                 if np.any(np.isnan(hyp)):
                     raise ValueError("Error: found a NaN in the hyperparameter samples")
             else:
                 theta = samples[1]
+                logL = samples[2]
 
             if np.any(np.isnan(theta)):
                 raise ValueError("Error: found a NaN in the timing samples")
-
-            logL = samples[-1]
 
             self.timing_chain[c] = theta[: self.n_timing_pars]
             self.template_chain[c] = tau
