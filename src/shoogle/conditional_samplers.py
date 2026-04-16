@@ -111,7 +111,7 @@ class TemplateSampler(object):
         self,
         proffile,
         weights,
-        minsigma=0.001,
+        minsigma=0.0,
         maxsigma=0.5,
         maxwraps=2,
         extra_phase=None,
@@ -299,8 +299,12 @@ class TemplateSampler(object):
             sigmasq01 * (self.maxsigma_sq - self.minsigma_sq) + self.minsigma_sq
         )
 
-        invgamma_beta = 1e-4
-        invgamma_alpha = 0.4
+        W2 = jnp.sum(self.w**2)
+        min_SN = 5.0
+
+        # Penalise peaks narrower than expected fluctuations
+        invgamma_beta = (min_SN**2 / W2) ** 2
+        invgamma_alpha = 0.5
         logprior += jnp.sum(
             invgamma_alpha * jnp.log(invgamma_beta)
             - jax.scipy.special.gammaln(invgamma_alpha)
