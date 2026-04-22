@@ -300,7 +300,7 @@ class TemplateSampler(object):
         )
 
         W2 = jnp.sum(self.w**2)
-        min_SN = 5.0
+        min_SN = 3.0
 
         # Penalise peaks narrower than expected fluctuations
         invgamma_beta = (min_SN**2 / W2) ** 2
