@@ -440,7 +440,6 @@ class TemplateSampler(object):
         x0 = res.params
         self.tau_0 = self._samples_to_phys(x0)[0]
         print("Optimising template:", logpost0, "->", -neg_logprob_fn(x0))
-        print("log-likelihoods:", loglike0, "->", self._log_like(self.tau_0, phases))
 
         warmup_key, sample_key = jax.random.split(rng_key, 2)
 
@@ -1779,7 +1778,6 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         (state, parameters), info = warmup.run(warmup_key, x0, num_steps=2000)
 
         self.nuts_params = parameters
-        print(info)
 
         step_fn = blackjax.nuts.build_kernel(blackjax.mcmc.integrators.yoshida)
 
