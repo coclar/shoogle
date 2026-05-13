@@ -950,9 +950,9 @@ class Gibbs(object):
             )
             if self.Edep:
                 tau[4 * self.npeaks : 5 * self.npeaks] += dphi
-            tau[4 * self.npeaks : 5 * self.npeaks] = np.mod(
-                tau[4 * self.npeaks : 5 * self.npeaks], 1.0
-            )
+                tau[4 * self.npeaks : 5 * self.npeaks] = np.mod(
+                    tau[4 * self.npeaks : 5 * self.npeaks], 1.0
+                )
             logL = self.tau_sampler._log_like(jnp.array(tau), jnp.array(self.phi))
             if logL > logL_max:
                 logL_max = logL
@@ -1183,6 +1183,7 @@ class Gibbs(object):
 
             tau = samples[0]
             if np.any(np.isnan(tau)):
+                print(tau)
                 raise ValueError("Error: found a NaN in the template samples")
 
             if self.nhyp > 0:
@@ -1212,6 +1213,8 @@ class Gibbs(object):
                 logL = samples[2]
 
             if np.any(np.isnan(theta)):
+                print("Tau:", tau)
+                print("theta:", theta)
                 raise ValueError("Error: found a NaN in the timing samples")
 
             self.timing_chain[c] = theta[: self.n_timing_pars]

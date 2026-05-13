@@ -833,9 +833,17 @@ class EdepTemplateSampler(TemplateSampler):
         tau_lo, logprior_lo = super()._samples_to_phys(x[: 4 * self.npeaks])
         tau_hi, logprior_hi = super()._samples_to_phys(x[4 * self.npeaks :])
 
+        mu_lo = tau_lo[self.npeaks : 2 * self.npeaks]
+        mu_hi = tau_hi[self.npeaks : 2 * self.npeaks]
+
+        mu_diff = jnp.abs(mu_lo - mu_hi)
+        mu_diff = jnp.minimum(mu_diff, 1.0 - mu_diff)
+
+        mu_diff_logprior = -0.5 * jnp.sum(mu_diff**2 / 0.05**2)
+
         tau = jnp.concatenate((tau_lo, tau_hi))
 
-        return tau, logprior_lo + logprior_hi
+        return tau, logprior_lo + logprior_hi + mu_diff_logprior
 
     def _phys_to_samples(self, tau):
         """
@@ -945,8 +953,6 @@ class LatentVariableSampler(object):
         self.maxwraps = maxwraps
         self.npeaks = npeaks
         self.wraps = jnp.arange(-self.maxwraps, self.maxwraps + 1, 1)
-
-        self.key = jax.random.key(0)
 
         if log10E is not None:
             self.log10E = log10E
