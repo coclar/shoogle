@@ -1090,27 +1090,38 @@ class Gibbs(object):
                 tau = state[1]
                 hyp = state[2]
 
-                tau, key = self.tau_sampler.sample_tau_given_theta(
-                    tau, jphi - phase_shifts, key, num_NUTS_steps
+                tau, key, tau_accept0, tau_diverged0, tau_step_size = (
+                    self.tau_sampler.sample_tau_given_theta(
+                        tau, jphi - phase_shifts, key, num_NUTS_steps
+                    )
                 )
                 mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
                     tau, jphi - phase_shifts, key
                 )
-                hyp, theta, phase_shifts, key, divergent, diverged0, step_size = (
-                    self.timing_sampler.sample_lambda_theta_given_tau_zm(
-                        hyp, mu_z, sigma_z, key, num_NUTS_steps
-                    )
+                (
+                    hyp,
+                    theta,
+                    phase_shifts,
+                    key,
+                    hyp_accept0,
+                    hyp_diverged0,
+                    hyp_step_size,
+                ) = self.timing_sampler.sample_lambda_theta_given_tau_zm(
+                    hyp, mu_z, sigma_z, key, num_NUTS_steps
                 )
                 logL = self.tau_sampler._log_like(tau, jphi - phase_shifts)
 
                 return (phase_shifts, tau, hyp), (
                     tau,
-                    hyp,
+                    tau_accept0,
+                    tau_diverged0,
+                    tau_step_size,
                     theta,
                     logL,
-                    divergent,
-                    diverged0,
-                    step_size,
+                    hyp,
+                    hyp_accept0,
+                    hyp_diverged0,
+                    hyp_step_size,
                 )
 
         else:
@@ -1124,8 +1135,10 @@ class Gibbs(object):
                 phase_shifts = state[0]
                 tau = state[1]
 
-                tau, key = self.tau_sampler.sample_tau_given_theta(
-                    tau, jphi - phase_shifts, key, num_NUTS_steps
+                tau, key, tau_accept0, tau_diverged0, tau_step_size = (
+                    self.tau_sampler.sample_tau_given_theta(
+                        tau, jphi - phase_shifts, key, num_NUTS_steps
+                    )
                 )
                 mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
                     tau, jphi - phase_shifts, key
@@ -1137,7 +1150,14 @@ class Gibbs(object):
                 )
                 logL = self.tau_sampler._log_like(tau, jphi - phase_shifts)
 
-                return (phase_shifts, tau), (tau, theta, logL)
+                return (phase_shifts, tau), (
+                    tau,
+                    tau_accept0,
+                    tau_diverged0,
+                    tau_step_size,
+                    theta,
+                    logL,
+                )
 
         print("JIT-compiling the Gibbs sampler")
         state, samples = gibbs_sampling_loop(state, key)
@@ -1186,21 +1206,39 @@ class Gibbs(object):
                 print(tau)
                 raise ValueError("Error: found a NaN in the template samples")
 
+            if plots:
+                tau_accept0 = samples[1]
+                tau_diverged0 = samples[2]
+                tau_step_size = samples[3]
+
+                print(tau_step_size, tau_accept0, tau_diverged0)
+                if tau_diverged0 or (tau_accept0 < 0.2):
+                    print("Template sampler slowed down: ", tau_accept0, tau_diverged0)
+                    print("Tau:", tau)
+                    print(
+                        "Final step size:",
+                        tau_step_size,
+                        "(",
+                        self.tau_sampler.nuts_params["step_size"],
+                        ")",
+                    )
+
+            theta = samples[4]
+            logL = samples[5]
+
             if self.nhyp > 0:
-                hyp = samples[1]
-                theta = samples[2]
-                logL = samples[3]
-                accept0 = samples[4]
-                diverged0 = samples[5]
-                step_size = samples[6]
+                hyp = samples[6]
+                hyp_accept0 = samples[7]
+                hyp_diverged0 = samples[8]
+                hyp_step_size = samples[9]
 
                 if plots:
-                    if diverged0 or (accept0 < 0.2):
-                        print("Rejected", accept0, diverged0)
+                    if hyp_diverged0 or (hyp_accept0 < 0.2):
+                        print("Rejected", hyp_accept0, hyp_diverged0)
                         print("Hyp:", hyp)
                         print(
                             "Final step size:",
-                            step_size,
+                            hyp_step_size,
                             "(",
                             self.timing_sampler.nuts_params["step_size"],
                             ")",
@@ -1208,9 +1246,6 @@ class Gibbs(object):
 
                 if np.any(np.isnan(hyp)):
                     raise ValueError("Error: found a NaN in the hyperparameter samples")
-            else:
-                theta = samples[1]
-                logL = samples[2]
 
             if np.any(np.isnan(theta)):
                 print("Tau:", tau)

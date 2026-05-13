@@ -427,93 +427,44 @@ class TemplateSampler(object):
                      Array of observed photon phases (in [0, 1]).
         """
 
-        logprob_fn = lambda x: self._log_post(x, phases)
-        neg_logprob_fn = lambda x: -self._log_post(x, phases)
-
         x0 = self._phys_to_samples(self.tau_0)
-        logpost0 = -neg_logprob_fn(x0)
-        loglike0 = self._log_like(self.tau_0, phases)
+        logprob_fn = lambda x: self._log_post(x, phases)
 
-        optimiser = LBFGS(neg_logprob_fn)
-        res = optimiser.run(x0)
-
-        x0 = res.params
-        self.tau_0 = self._samples_to_phys(x0)[0]
-        print("Optimising template:", logpost0, "->", -neg_logprob_fn(x0))
+        warmup = blackjax.window_adaptation(
+            blackjax.nuts,
+            logprob_fn,
+            progress_bar=True,
+            target_acceptance_rate=0.8,
+            is_mass_matrix_diagonal=True,
+            max_num_doublings=15,
+            # integrator=blackjax.mcmc.integrators.yoshida
+        )
 
         warmup_key, sample_key = jax.random.split(rng_key, 2)
+        (state, parameters), info = warmup.run(warmup_key, x0, num_steps=2000)
 
-        step_fn = blackjax.nuts.build_kernel(
-            integrator=blackjax.mcmc.integrators.yoshida
-        )
-
-        @jax.jit
-        def inv_hess_diag(x, phases):
-
-            grad = lambda x: jax.grad(self._log_post, argnums=0)(x, phases)
-
-            def d2f_dxi2(i):
-                v = jnp.zeros_like(x).at[i].set(1.0)
-                _, hi = jax.jvp(grad, (x,), (v,))
-                return hi[i]
-
-            Hdiag = jax.vmap(d2f_dxi2, in_axes=0, out_axes=0)(jnp.arange(len(x)))
-
-            return jnp.clip(1.0 / jnp.abs(Hdiag), 0, 1e-2)
-
-        def kernel_generator(step_size):
-
-            def kernel(rng_key, state):
-
-                IMM = inv_hess_diag(state.position, phases)
-
-                logprob_fn = lambda x: self._log_post(x, phases)
-
-                return step_fn(
-                    rng_key=rng_key,
-                    state=state,
-                    logdensity_fn=logprob_fn,
-                    step_size=step_size,
-                    max_num_doublings=10,
-                    inverse_mass_matrix=IMM,
-                )
-
-            return kernel
-
-        state = blackjax.mcmc.hmc.HMCState(
-            position=x0,
-            logdensity=self._log_post(x0, phases),
-            logdensity_grad=jax.grad(self._log_post, argnums=0)(x0, phases),
-        )
-
-        step_size_opt = blackjax.adaptation.step_size.find_reasonable_step_size(
-            warmup_key,
-            kernel_generator,
-            state,
-            initial_step_size=0.1,
-            target_accept=0.95,
-        )
+        self.nuts_params = parameters
+        step_fn = blackjax.nuts.build_kernel()
 
         @jax.jit
-        def kernel(rng_key, state, phases):
-
-            IMM = inv_hess_diag(state.position, phases)
+        def kernel(rng_key, state, phases, step_size):
 
             logprob_fn = lambda x: self._log_post(x, phases)
-            state, _ = step_fn(
+            state, info = step_fn(
                 rng_key=rng_key,
                 state=state,
                 logdensity_fn=logprob_fn,
-                step_size=0.5,
-                inverse_mass_matrix=IMM,
-                max_num_doublings=15,
+                inverse_mass_matrix=self.nuts_params["inverse_mass_matrix"],
+                max_num_doublings=self.nuts_params["max_num_doublings"],
+                step_size=step_size,
             )
 
-            return state, (self._samples_to_phys(state.position)[0], state.logdensity)
+            return state, info
 
+        self.logprob_fn = jax.jit(self._log_post)
         self.kernel = kernel
 
-        return self.tau_0, sample_key
+        return self._samples_to_phys(state.position)[0], sample_key
 
     def sample(self, tau, phases, key, num_samples=1000):
         """
@@ -551,12 +502,41 @@ class TemplateSampler(object):
         logprob_fn = lambda x: self._log_post(x, phases)
         state = blackjax.nuts.init(x0, logprob_fn)
 
-        one_step = lambda state, key: self.kernel(key, state, phases)
+        step_size = self.nuts_params["step_size"]
+        one_step = lambda state, key: self.kernel(key, state, phases, step_size)
         tau_keys = jax.random.split(key, num_samples + 1)
 
-        _, samples = jax.lax.scan(one_step, state, tau_keys[:-1])
+        state, infos = jax.lax.scan(one_step, state, tau_keys[:-1])
 
-        return samples, tau_keys[-1]
+        loop_state = (state, tau_keys[-1], step_size, infos)
+        diverged0 = infos.is_divergent[-1]
+        accept0 = infos.acceptance_rate[-1]
+
+        def diverged(loop_state):
+            infos = loop_state[-1]
+            step_size = loop_state[2]
+
+            return (infos.is_divergent[-1] | (infos.acceptance_rate[-1] < 0.2)) & (
+                step_size > self.nuts_params["step_size"] / 16
+            )
+
+        def body_fun(loop_state):
+            state = loop_state[0]
+            key = loop_state[1]
+            keys = jax.random.split(key, num_samples + 1)
+            step_size = loop_state[2] / 2.0
+
+            one_step = lambda state, key: self.kernel(key, state, phases, step_size)
+            state, infos = jax.lax.scan(one_step, state, keys[:-1])
+
+            return (state, keys[-1], step_size, infos)
+
+        state, key, step_size, infos = jax.lax.while_loop(
+            diverged, body_fun, loop_state
+        )
+
+        sample = self._samples_to_phys(state.position)[0]
+        return sample, tau_keys[-1], accept0, diverged0, infos.num_integration_steps[-1]
 
     def unswap_peaks(self, tau):
 
@@ -638,8 +618,10 @@ class TemplateSampler(object):
                       New random number key
         """
 
-        samples, key = self.sample(tau, phases, key, num_steps)
-        return self.unswap_peaks(samples[0][-1]), key
+        sample, key, accept0, diverged0, step_size = self.sample(
+            tau, phases, key, num_steps
+        )
+        return self.unswap_peaks(sample), key, accept0, diverged0, step_size
 
 
 class EdepTemplateSampler(TemplateSampler):
@@ -1775,7 +1757,7 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
             logprob_fn,
             progress_bar=True,
             target_acceptance_rate=0.9,
-            is_mass_matrix_diagonal=True,
+            is_mass_matrix_diagonal=False,
             max_num_doublings=15,
             integrator=blackjax.mcmc.integrators.yoshida,
         )
