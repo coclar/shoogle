@@ -4,6 +4,7 @@ from pint.observatory.satellite_obs import SatelliteObs
 from pint.templates.lctemplate import LCTemplate, prim_io
 from pint.residuals import Residuals
 from pint import toa
+from pint import logging
 from astropy import units as u
 from astropy.time import Time
 from matplotlib.gridspec import GridSpec
@@ -14,27 +15,9 @@ import matplotlib.pyplot as plt
 
 from optparse import OptionParser
 
+from shoogle.gibbs_sampler import read_input_ft1_file
 
-def read_input_ft1_file(infile, FT2, weightfield, wmin):
-
-    try:
-        SatelliteObs(name="Fermi", ft2name=FT2)
-    except ValueError:
-        pass
-
-    toas = get_Fermi_TOAs(
-        infile,
-        weightcolumn=weightfield,
-        minweight=wmin,
-        include_bipm=False,
-        planets=True,
-    )
-
-    # toas = toa.get_TOAs_list(tl,include_bipm=False,planets=True)
-    weights = np.array([float(w["weight"]) for w in toas.table["flags"]])
-    energies = np.array([float(w["energy"]) for w in toas.table["flags"]])
-    return toas, weights, energies
-
+logging.setup(level="DEBUG")
 
 desc = "Fold fermi photons using pint, output an ascii file with time|phase|weight|dphi_dtasc columns"
 parser = OptionParser(usage=" %prog options", description=desc)
@@ -49,7 +32,7 @@ parser.add_option(
     "-W",
     "--weightfield",
     type="string",
-    default="MODEL_WEIGHT",
+    default=None,
     help="Column name in FT1 file for photon weights",
 )
 parser.add_option(
@@ -89,11 +72,33 @@ parser.add_option(
 parfile = options.parfile
 ft1file = options.ft1
 ft2file = options.ft2
-weightfield = options.weightfield
 wmin = options.weightcut
 
+if options.weightfield is None:
+    weightfield = None
+    f = fits.open(options.ft1)
+    colnames = f[1].data.names
+
+    for c in colnames:
+        w = None
+        if c == "WEIGHT":
+            w = "WEIGHT"
+        elif c == "MODEL_WEIGHT":
+            w = "MODEL_WEIGHT"
+        elif c[:4] == "4FGL":
+            w = c
+
+        if w is not None:
+            if weightfield is not None:
+                raise ValueError("Cannot unambiguously determine the weight column")
+            weightfield = w
+else:
+    weightfield = options.weightfield
+
 timing_model = get_model(parfile)
-fermi_toas, weights, energies = read_input_ft1_file(ft1file, ft2file, weightfield, wmin)
+fermi_toas, weights, energies = read_input_ft1_file(
+    ft1file, ft2file, weightfield, wmin, timing_model
+)
 
 fermi_phases = np.mod(timing_model.phase(fermi_toas).frac, 1.0)
 tssb = timing_model.get_barycentric_toas(fermi_toas).value

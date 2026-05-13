@@ -34,21 +34,14 @@ import jax
 import jax.numpy as jnp
 
 
-def read_input_ft1_file(infile, FT2, weightfield, wmin, ephem_str):
+def read_input_ft1_file(infile, FT2, weightfield, wmin, model):
 
     try:
         SatelliteObs(name="Fermi", ft2name=FT2)
     except ValueError:
         pass
 
-    toas = get_Fermi_TOAs(
-        infile,
-        weightcolumn=weightfield,
-        minweight=wmin,
-        include_bipm=True,
-        planets=False,
-        ephem=ephem_str,
-    )
+    toas = get_Fermi_TOAs(infile, weightcolumn=weightfield, minweight=wmin, model=model)
 
     weights = np.array([float(t["weight"]) for t in toas.table["flags"]])
     energies = np.array([float(t["energy"]) for t in toas.table["flags"]])
@@ -116,7 +109,7 @@ class Gibbs(object):
         print("Loading FT1 file")
 
         self.photon_toas, self.w, energies = read_input_ft1_file(
-            ft1file, ft2file, weightfield, wmin, self.timing_model.EPHEM.value
+            ft1file, ft2file, weightfield, wmin, self.timing_model
         )
         self.t = self.photon_toas.get_mjds().value
 
