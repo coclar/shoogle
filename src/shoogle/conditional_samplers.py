@@ -1,11 +1,12 @@
 import numpy as np
 import jax
 from jax.scipy.linalg import cholesky, cho_solve, solve_triangular
+from jax.scipy.special import expit, logit
+from jax.scipy.stats import beta
 import jax.numpy as jnp
 from jaxopt import LBFGS
 import blackjax
 from optax.assignment import hungarian_algorithm
-from scipy.special import logit, expit
 from tqdm.auto import tqdm
 from astropy import units as u
 import pickle
@@ -32,6 +33,65 @@ def new_default_bounds(self):
 
 
 LCPrimitive._default_bounds = new_default_bounds
+
+
+def dirichlet_to_unconstrained(A, K):
+
+    Bk = A.copy()
+
+    U = 1.0 - Bk[0]
+
+    for k in range(1, K):
+        Bk = Bk.at[k].set(A[k] / U)
+        U -= A[k]
+
+    return logit(Bk)
+
+
+def unconstrained_to_dirichlet(x, K, alpha=1.0):
+
+    Bk = expit(x)
+
+    log_jac = jnp.sum(jnp.log(Bk * (1 - Bk)))
+
+    log_prior = beta.logpdf(Bk[0], alpha, K * alpha)
+
+    A = Bk.copy()
+    U = 1.0 - A[0]
+    for k in range(1, K):
+        log_prior += beta.logpdf(Bk[k], alpha, (K - k) * alpha)
+        A = A.at[k].set(Bk[k] * U)
+        U -= A[k]
+
+    return A, log_jac + log_prior
+
+
+def invgamma_to_unconstrained(s, logsmin, logsmax):
+
+    x01 = (jnp.log(s) - logsmin) / (logsmax - logsmin)
+
+    return logit(x01)
+
+
+def unconstrained_to_invgamma(x, logsmin, logsmax, alpha, beta):
+
+    logs01 = expit(x)
+    log_jac = jnp.sum(jnp.log(logs01 * (1 - logs01)))
+
+    logs = logsmin + logs01 * (logsmax - logsmin)
+    s = jnp.exp(logs)
+
+    # Converts to uniform distribution on sigma^2
+    log_jac += jnp.sum(2 * logs) + len(s) * jnp.log(2)
+
+    log_prior = jnp.sum(
+        alpha * jnp.log(beta)
+        - jax.scipy.special.gammaln(alpha)
+        - (alpha + 1) * jnp.log(s**2)
+        - beta / s**2
+    )
+
+    return s, log_jac + log_prior
 
 
 def read_template(proffile, extra_phase=None):
@@ -111,7 +171,7 @@ class TemplateSampler(object):
         self,
         proffile,
         weights,
-        minsigma=0.0,
+        minsigma=0.0001,
         maxsigma=0.5,
         maxwraps=2,
         extra_phase=None,
@@ -142,14 +202,31 @@ class TemplateSampler(object):
         )
         self.A_0 *= 0.999  # This prevents nasty numerical issues...
 
+        # Choose the "best" peak as an anchor, and put it in the first position
+        peak_max = self.A_0 / self.sigma_0
+        i0 = np.argsort(peak_max)[::-1]
+
+        self.A_0 = self.A_0[i0]
+        self.mu_0 = self.mu_0[i0]
+        self.sigma_0 = self.sigma_0[i0]
+
+        # Then sort remaining peaks by location
+        mu_diff = np.mod(self.mu_0[1:] - self.mu_0[0], 1.0)
+        ik = np.argsort(mu_diff)
+
+        self.A_0[1:] = self.A_0[1 + ik]
+        self.mu_0[1:] = np.mod(self.mu_0[1 + ik] - self.mu_0[0], 1.0) + self.mu_0[0]
+        self.sigma_0[1:] = self.sigma_0[1 + ik]
+
         self.tau_0 = jnp.array(np.concatenate((self.A_0, self.mu_0, self.sigma_0)))
+
         self.npeaks = len(self.A_0)
 
         self.maxwraps = maxwraps
         self.wraps = jnp.arange(-2, 3)
 
-        self.minsigma_sq = minsigma**2
-        self.maxsigma_sq = maxsigma**2
+        self.minlogsigma = jnp.log(minsigma)
+        self.maxlogsigma = jnp.log(maxsigma)
         self.w = jnp.array(weights)
 
     def template(self, tau, phases):
@@ -263,56 +340,50 @@ class TemplateSampler(object):
                        and the Jacobian of the logit transforms.
         """
 
-        logprior = 0
+        # 2.0 = slightly pushes amplitudes away from zero
+        amp_diri_alpha = 2.0
 
-        Bk = jax.scipy.special.expit(x[: self.npeaks])
-        logprior += jnp.sum(jnp.log(Bk * (1 - Bk)))
-        logprior += jax.scipy.stats.beta.logpdf(Bk[0], 1.0, self.npeaks)
+        # 1.0 for the peak differences, equivalent to the hyper-triangular prior of PRD 100 084041
+        mu_diri_alpha = 1.0
 
-        A = Bk.copy()
-        U = 1 - A[0]
-        for p in range(1, self.npeaks):
-            logprior += jax.scipy.stats.beta.logpdf(Bk[p], 1.0, self.npeaks - p)
-            A = A.at[p].set(Bk[p] * U)
-            U -= A[p]
-
-        # Uniform between 0, 1
-        ux = jax.scipy.special.expit(x[self.npeaks : 2 * self.npeaks])
-        uy = jax.scipy.special.expit(x[2 * self.npeaks : 3 * self.npeaks])
-        logprior += jnp.sum(jnp.log(ux * (1 - ux)))
-        logprior += jnp.sum(jnp.log(uy * (1 - uy)))
-
-        # 2D normal distribution
-        nx = jax.scipy.stats.norm.isf(ux)
-        ny = jax.scipy.stats.norm.isf(uy)
-
-        # Force it to be near the unit circle
-        # (avoids coordinate singularity at nx, ny = 0)
-        donut_sigma = 0.05
-        logprior += jnp.sum(-0.5 * (jnp.sqrt(nx**2 + ny**2) - 1) ** 2 / donut_sigma**2)
-
-        mu = jnp.arctan2(nx, ny) / (2 * jnp.pi)
-
-        sigmasq01 = jax.scipy.special.expit(x[3 * self.npeaks : 4 * self.npeaks])
-        logprior += jnp.sum(jnp.log(sigmasq01 * (1 - sigmasq01)))
-        sigma = jnp.sqrt(
-            sigmasq01 * (self.maxsigma_sq - self.minsigma_sq) + self.minsigma_sq
+        A, A_logprior = unconstrained_to_dirichlet(
+            x[: self.npeaks], self.npeaks, amp_diri_alpha
         )
+
+        mu_diffs, mu_logprior = unconstrained_to_dirichlet(
+            x[self.npeaks + 1 : 2 * self.npeaks], self.npeaks - 1, mu_diri_alpha
+        )
+
+        mu0 = x[self.npeaks][None]
+        mu = jnp.concatenate((mu0, mu0 + jnp.cumsum(mu_diffs)))
+
+        # Gaussian on anchor peak location. Should hopefully prevent wrapping...
+        mu_0_sigma = 0.25
+        mu_logprior -= 0.5 * ((mu[0] - self.tau_0[self.npeaks]) ** 2 / mu_0_sigma**2)
 
         W2 = jnp.sum(self.w**2)
         min_SN = 3.0
 
-        # Penalise peaks narrower than expected fluctuations
+        # Inverse-gamma distribution on sigma^2
+        # alpha = 1 is equivalent to a log-uniform prior on sigma^2 at high values
+        invgamma_alpha = 1.0
+
+        # This is roughly the width at which phase-averaged flux would be detected with 3-sigma significance
+        # This prior penalises peaks that are significantly narrower than this scale
         invgamma_beta = (min_SN**2 / W2) ** 2
-        invgamma_alpha = 0.5
-        logprior += jnp.sum(
-            invgamma_alpha * jnp.log(invgamma_beta)
-            - jax.scipy.special.gammaln(invgamma_alpha)
-            - (invgamma_alpha + 1) * jnp.log(sigma**2)
-            - invgamma_beta / sigma**2
+
+        sigma, sigma_logprior = unconstrained_to_invgamma(
+            x[2 * self.npeaks : 3 * self.npeaks],
+            self.minlogsigma,
+            self.maxlogsigma,
+            invgamma_alpha,
+            invgamma_beta,
         )
 
-        return jnp.concatenate((A, mu, sigma)), logprior
+        return (
+            jnp.concatenate((A, mu, sigma)),
+            A_logprior + mu_logprior + sigma_logprior,
+        )
 
     def _log_like(self, tau, phases):
         """
@@ -389,28 +460,17 @@ class TemplateSampler(object):
         mu = tau[self.npeaks : self.npeaks * 2]
         sigma = tau[self.npeaks * 2 :]
 
-        Bk = A.copy()
-
-        # Transform to beta-distributed variables within (0,1)
-        # which ensures a Dirichlet prior on amplitudes + unpulsed comp.
-        U = 1 - Bk[0]
-        for p in range(1, self.npeaks):
-            Bk = Bk.at[p].set(A[p] / U)
-            U -= A[p]
-
-        # Uniform prior on log(sigma), transformed to (0,1)
-        sigmasq01 = (sigma**2 - self.minsigma_sq) / (
-            self.maxsigma_sq - self.minsigma_sq
+        logitBk = dirichlet_to_unconstrained(A, self.npeaks)
+        logitsigma01 = invgamma_to_unconstrained(
+            sigma, self.minlogsigma, self.maxlogsigma
         )
 
-        nx = jnp.sin(2 * jnp.pi * mu)
-        ny = jnp.cos(2 * jnp.pi * mu)
+        mu_diff = jnp.mod(mu[1:] - mu[0], 1.0)
+        mu_diff = mu_diff.at[1:].set(mu_diff[1:] - mu_diff[:-1])
 
-        ux = jax.scipy.stats.norm.sf(nx)
-        uy = jax.scipy.stats.norm.sf(ny)
+        logitmudiff = dirichlet_to_unconstrained(mu_diff, self.npeaks - 1)
 
-        # then logit transformed -> (-inf,inf)
-        x = jax.scipy.special.logit(jnp.concatenate((Bk, ux, uy, sigmasq01)))
+        x = jnp.concatenate((logitBk, mu[0][None], logitmudiff, logitsigma01))
 
         return x
 
@@ -429,15 +489,25 @@ class TemplateSampler(object):
 
         x0 = self._phys_to_samples(self.tau_0)
         logprob_fn = lambda x: self._log_post(x, phases)
+        neg_logprob_fn = lambda x: -self._log_post(x, phases)
+
+        logL0 = logprob_fn(x0)
+        optimiser = LBFGS(neg_logprob_fn)
+        res = optimiser.run(x0)
+        x1 = res.params
+        logL1 = logprob_fn(x1)
+
+        print("Optimising template before burn-in:", logL0, "->", logL1)
+        self.tau_0 = self._samples_to_phys(x1)[0]
+        x0 = self._phys_to_samples(self.tau_0)
 
         warmup = blackjax.window_adaptation(
             blackjax.nuts,
             logprob_fn,
             progress_bar=True,
-            target_acceptance_rate=0.8,
+            target_acceptance_rate=0.9,
             is_mass_matrix_diagonal=True,
-            max_num_doublings=15,
-            # integrator=blackjax.mcmc.integrators.yoshida
+            max_num_doublings=10,
         )
 
         warmup_key, sample_key = jax.random.split(rng_key, 2)
@@ -507,36 +577,14 @@ class TemplateSampler(object):
         tau_keys = jax.random.split(key, num_samples + 1)
 
         state, infos = jax.lax.scan(one_step, state, tau_keys[:-1])
-
-        loop_state = (state, tau_keys[-1], step_size, infos)
-        diverged0 = infos.is_divergent[-1]
-        accept0 = infos.acceptance_rate[-1]
-
-        def diverged(loop_state):
-            infos = loop_state[-1]
-            step_size = loop_state[2]
-
-            return (infos.is_divergent[-1] | (infos.acceptance_rate[-1] < 0.2)) & (
-                step_size > self.nuts_params["step_size"] / 16
-            )
-
-        def body_fun(loop_state):
-            state = loop_state[0]
-            key = loop_state[1]
-            keys = jax.random.split(key, num_samples + 1)
-            step_size = loop_state[2] / 2.0
-
-            one_step = lambda state, key: self.kernel(key, state, phases, step_size)
-            state, infos = jax.lax.scan(one_step, state, keys[:-1])
-
-            return (state, keys[-1], step_size, infos)
-
-        state, key, step_size, infos = jax.lax.while_loop(
-            diverged, body_fun, loop_state
-        )
-
         sample = self._samples_to_phys(state.position)[0]
-        return sample, tau_keys[-1], accept0, diverged0, infos.num_integration_steps[-1]
+        return (
+            sample,
+            tau_keys[-1],
+            infos.acceptance_rate[-1],
+            infos.is_divergent[-1],
+            infos.num_integration_steps[-1],
+        )
 
     def unswap_peaks(self, tau):
 
@@ -621,7 +669,7 @@ class TemplateSampler(object):
         sample, key, accept0, diverged0, step_size = self.sample(
             tau, phases, key, num_steps
         )
-        return self.unswap_peaks(sample), key, accept0, diverged0, step_size
+        return sample, key, accept0, diverged0, step_size
 
 
 class EdepTemplateSampler(TemplateSampler):
@@ -812,20 +860,71 @@ class EdepTemplateSampler(TemplateSampler):
                        and the Jacobian of the logit transforms.
         """
 
-        tau_lo, logprior_lo = super()._samples_to_phys(x[: 4 * self.npeaks])
-        tau_hi, logprior_hi = super()._samples_to_phys(x[4 * self.npeaks :])
+        # Assuming A_lo ~ A_hi, then we don't want to double-count the prior on alpha
+        # If A_lo = A_hi, then alpha = 1.5 is equivalent to alpha = 2.0 for a single amplitude
+        amp_diri_alpha = 1.5
 
-        mu_lo = tau_lo[self.npeaks : 2 * self.npeaks]
-        mu_hi = tau_hi[self.npeaks : 2 * self.npeaks]
+        A_lo, A_lo_logprior = unconstrained_to_dirichlet(
+            x[: self.npeaks], self.npeaks, amp_diri_alpha
+        )
+        A_hi, A_hi_logprior = unconstrained_to_dirichlet(
+            x[3 * self.npeaks : 4 * self.npeaks], self.npeaks, amp_diri_alpha
+        )
 
-        mu_diff = jnp.abs(mu_lo - mu_hi)
-        mu_diff = jnp.minimum(mu_diff, 1.0 - mu_diff)
+        mu_mid_diffs, mu_logprior = unconstrained_to_dirichlet(
+            x[self.npeaks + 1 : 2 * self.npeaks], self.npeaks - 1, 1.0
+        )
 
-        mu_diff_logprior = -0.5 * jnp.sum(mu_diff**2 / 0.05**2)
+        mu_mid_0 = x[self.npeaks]
+        mu_mid = jnp.concatenate((mu_mid_0[None], mu_mid_0 + jnp.cumsum(mu_mid_diffs)))
 
-        tau = jnp.concatenate((tau_lo, tau_hi))
+        # Gaussian on anchor peak location. Should hopefully prevent wrapping...
+        mu_mid_0_sigma = 0.25
+        mu0_mid_0 = 0.5 * (self.tau_0[self.npeaks] + self.tau_0[4 * self.npeaks])
+        mu_logprior -= 0.5 * ((mu_mid_0 - mu0_mid_0) ** 2 / mu_mid_0_sigma**2)
 
-        return tau, logprior_lo + logprior_hi + mu_diff_logprior
+        mu_diff = x[4 * self.npeaks : 5 * self.npeaks]
+
+        mu_lo = mu_mid - mu_diff
+        mu_hi = mu_mid + mu_diff
+
+        # Prevent hi/lo energy peaks from differing too much
+        mu_logprior -= 0.5 * jnp.sum(mu_diff**2 / 0.05**2)
+
+        # If sigma_lo = sigma_hi, then summing the lo/hi logprior is equivalent to having
+        # alpha_total -> 2 * alpha + 1 and beta_total -> 2 * beta
+        # alpha = 0.0 is unphysical (Gamma(alpha) explodes as alpha -> 0), so set it to something small but non-zero
+        invgamma_alpha = 0.1
+        min_SN = 3.0
+        W2 = jnp.sum(self.w**2)
+        invgamma_beta = 0.5 * (min_SN**2 / W2) ** 2
+
+        sigma_lo, sigma_lo_logprior = unconstrained_to_invgamma(
+            x[2 * self.npeaks : 3 * self.npeaks],
+            self.minlogsigma,
+            self.maxlogsigma,
+            invgamma_alpha,
+            invgamma_beta,
+        )
+
+        sigma_hi, sigma_hi_logprior = unconstrained_to_invgamma(
+            x[5 * self.npeaks : 6 * self.npeaks],
+            self.minlogsigma,
+            self.maxlogsigma,
+            invgamma_alpha,
+            invgamma_beta,
+        )
+
+        tau = jnp.concatenate((A_lo, mu_lo, sigma_lo, A_hi, mu_hi, sigma_hi))
+
+        return (
+            tau,
+            A_lo_logprior
+            + A_hi_logprior
+            + mu_logprior
+            + sigma_lo_logprior
+            + sigma_hi_logprior,
+        )
 
     def _phys_to_samples(self, tau):
         """
@@ -842,10 +941,43 @@ class EdepTemplateSampler(TemplateSampler):
         x          : Internal co-ordinates used for sampling with blackjax
         """
 
-        x_lo = super()._phys_to_samples(tau[: 3 * self.npeaks])
-        x_hi = super()._phys_to_samples(tau[3 * self.npeaks :])
+        A_lo = tau[: self.npeaks]
+        mu_lo = tau[self.npeaks : 2 * self.npeaks]
+        sigma_lo = tau[2 * self.npeaks : 3 * self.npeaks]
 
-        x = jnp.concatenate((x_lo, x_hi))
+        A_hi = tau[3 * self.npeaks : 4 * self.npeaks]
+        mu_hi = tau[4 * self.npeaks : 5 * self.npeaks]
+        sigma_hi = tau[5 * self.npeaks : 6 * self.npeaks]
+
+        logitBk_lo = dirichlet_to_unconstrained(A_lo, self.npeaks)
+        logitBk_hi = dirichlet_to_unconstrained(A_hi, self.npeaks)
+
+        logitsigma01_lo = invgamma_to_unconstrained(
+            sigma_lo, self.minlogsigma, self.maxlogsigma
+        )
+        logitsigma01_hi = invgamma_to_unconstrained(
+            sigma_hi, self.minlogsigma, self.maxlogsigma
+        )
+
+        mu_mid = 0.5 * (mu_lo + mu_hi)
+        mu_diff = 0.5 * (mu_hi - mu_lo)
+
+        mu_mid_diff = jnp.mod(mu_mid[1:] - mu_mid[0], 1.0)
+        mu_mid_diff = mu_mid_diff.at[1:].set(mu_mid_diff[1:] - mu_mid_diff[:-1])
+
+        logit_mu_mid_diff = dirichlet_to_unconstrained(mu_mid_diff, self.npeaks - 1)
+
+        x = jnp.concatenate(
+            (
+                logitBk_lo,
+                mu_mid[0][None],
+                logit_mu_mid_diff,
+                logitsigma01_lo,
+                logitBk_hi,
+                mu_diff,
+                logitsigma01_hi,
+            )
+        )
 
         return x
 

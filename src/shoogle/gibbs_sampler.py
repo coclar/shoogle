@@ -1206,22 +1206,17 @@ class Gibbs(object):
                 print(tau)
                 raise ValueError("Error: found a NaN in the template samples")
 
-            if plots:
-                tau_accept0 = samples[1]
-                tau_diverged0 = samples[2]
-                tau_step_size = samples[3]
+            tau_accept0 = samples[1]
+            tau_diverged0 = samples[2]
+            tau_step_size = samples[3]
 
-                print(tau_step_size, tau_accept0, tau_diverged0)
-                if tau_diverged0 or (tau_accept0 < 0.2):
-                    print("Template sampler slowed down: ", tau_accept0, tau_diverged0)
-                    print("Tau:", tau)
-                    print(
-                        "Final step size:",
-                        tau_step_size,
-                        "(",
-                        self.tau_sampler.nuts_params["step_size"],
-                        ")",
-                    )
+            if tau_diverged0:
+                print(
+                    "Template sampler divergence: ",
+                    tau_accept0,
+                    tau_diverged0,
+                    tau_step_size,
+                )
 
             theta = samples[4]
             logL = samples[5]
