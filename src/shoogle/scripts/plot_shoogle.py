@@ -67,7 +67,7 @@ def main(argv=None):
     )
     parser.add_option(
         "-o",
-        "--output",
+        "--outputfile",
         type="string",
         default=None,
         help="Base filename for saving plots",
@@ -110,7 +110,7 @@ def main(argv=None):
     else:
         weightfield = options.weightfield
 
-    psr = Gibbs(
+    G = Gibbs(
         parfile=options.parfile,
         priorfile=options.priorfile,
         ft1file=options.ft1,
@@ -122,51 +122,41 @@ def main(argv=None):
         Edep=options.Edep,
     )
 
-    res = GibbsResults(psr)
-    res.load_results(load_from=[options.output + ".npz"], decimated=True)
-    res.MAP_phases()
+    res = GibbsResults(G)
+    res.load_results(load_from=[options.outputfile + ".npz"], decimated=True)
 
-    fig1, ax = plt.subplots(2, 1, height_ratios=[1, 2], figsize=(7, 12))
-    fermi_lc(res.phi_MAP, res.psr.w, ax=ax[0], xbins=50)
-    res.plot_templates(ax[0])
-    res.scatter_phases(res.phi_MAP, ax[1])
-    plt.savefig(options.output + "_phases.pdf", bbox_inches="tight")
+    res.write_tvsph(options.outputfile + "_MAP.tvsph", res.phi_MAP)
+    res.write_new_template(options.outputfile + "_prof.dat")
+    if res.psr.has_OPV:
+        res.write_new_parfile(options.outputfile + "_orbwaves.par")
+        res.write_orbifunc_parfile(options.outputfile + "_orbifunc.par")
+    else:
+        res.write_new_parfile(options.outputfile + ".par")
 
-    if hasattr(res.psr, "radio_toas"):
-        fig2, ax2 = plt.subplots(2, 2, sharex="col")
-        res.plot_radio_resids(ax2)
-        plt.savefig(options.output + "_radio.pdf", bbox_inches="tight")
+    endfile = ".png"
+    if G.fit_TN or G.fit_OPV:
+        fig1 = res.hyp_corner()
+        plt.savefig(
+            options.outputfile + "_hyperparameters" + endfile, bbox_inches="tight"
+        )
 
-    if options.output:
-        res.write_tvsph(options.output + "_MAP.tvsph", res.phi_MAP)
-        res.write_new_template(options.output + "_prof.dat")
-        if res.psr.has_OPV:
-            res.write_new_parfile(options.output + "_orbwaves.par")
-            res.write_orbifunc_parfile(options.output + "_orbifunc.par")
-        else:
-            res.write_new_parfile(options.output + ".par")
+    if res.psr.has_TN:
+        fig2 = res.timing_corner(nWX=G.nWXfreqs)
+    else:
+        fig2 = res.timing_corner(plot_wxcomp=True)
+    plt.savefig(options.outputfile + "_timingparameters" + endfile, bbox_inches="tight")
+
+    fig3 = res.template_corner()
+    plt.savefig(
+        options.outputfile + "_templateparameters" + endfile, bbox_inches="tight"
+    )
+
+    fig4 = res.summary_plot()
+    plt.savefig(options.outputfile + "_summary" + endfile, bbox_inches="tight")
 
     if options.Edep:
-        fig2, ax = res.plot_Edep_profiles()
-        plt.savefig(options.output + "_Edep_profiles.pdf", bbox_inches="tight")
-
-    if res.psr.fit_TN or res.psr.fit_OPV:
-        fig3 = res.hyp_corner()
-        if options.output:
-            plt.savefig(options.output + "_hyperparameters.pdf", bbox_inches="tight")
-
-    fig4 = res.timing_corner(nWX=psr.nWXfreqs)
-    if options.output:
-        plt.savefig(options.output + "_timingparameters.pdf", bbox_inches="tight")
-
-    fig5 = res.template_corner()
-    if options.output:
-        plt.savefig(options.output + "_templateparameters.pdf", bbox_inches="tight")
-
-    if res.psr.fit_TN or res.psr.fit_OPV:
-        fig6 = res.summary_plot()
-        if options.output:
-            plt.savefig(options.output + "_summary.pdf", bbox_inches="tight")
+        fig5, ax = res.plot_Edep_profiles()
+        plt.savefig(options.outputfile + "_Edep_prof" + endfile, bbox_inches="tight")
 
     if not options.quiet:
         plt.show()

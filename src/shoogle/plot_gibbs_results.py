@@ -288,30 +288,54 @@ class GibbsResults(object):
 
     def _find_MAP(self):
 
-        all_chains = np.append(self.timing_chain, self.template_chain, axis=1)
+        all_chains = np.copy(self.timing_chain)
 
-        if self.psr.fit_TN or self.psr.fit_OPV:
-            all_chains = np.append(all_chains, self.hyp_chain, axis=1)
         if self.psr.has_OPV:
             all_chains = np.append(all_chains, self.opv_amps_chain, axis=1)
 
-        MAP, _ = mean_shift(all_chains, seeds=np.mean(all_chains, axis=0)[None, :])
-        MAP = MAP[0, :]
+        M = np.mean(all_chains, axis=0)
+        C = np.cov(all_chains, rowvar=False)
 
-        e = self.psr.n_timing_pars
-        self.timing_MAP = MAP[:e]
-        s = self.psr.n_timing_pars
-        n = len(self.psr.tau_sampler.tau_0)
-        self.template_MAP = MAP[s : s + n]
-        s = s + n
+        # Finds the closest sample to the centre of the posterior distribution
+        chi2 = np.einsum(
+            "ij,jk,ki->i",
+            (all_chains - M[None, :]),
+            np.linalg.inv(C),
+            (all_chains - M[None, :]).T,
+        )
+        idx = np.argmin(chi2)
 
-        if self.psr.fit_TN or self.psr.fit_OPV:
-            n = self.psr.nhyp
-            self.hyp_MAP = MAP[s : s + n]
-            s = s + n
+        self.timing_MAP = M[: self.psr.n_timing_pars]  # self.timing_chain[idx]
 
         if self.psr.has_OPV:
-            self.opv_amps_MAP = MAP[s:]
+            self.opv_amps_MAP = M[self.psr.n_timing_pars :]
+
+        M = np.mean(self.template_chain, axis=0)
+        C = np.cov(self.template_chain, rowvar=False)
+
+        chi2 = np.einsum(
+            "ij,jk,ki->i",
+            (self.template_chain - M[None, :]),
+            np.linalg.inv(C),
+            (self.template_chain - M[None, :]).T,
+        )
+
+        idx = np.argmin(chi2)
+        self.template_MAP = self.template_chain[idx]
+
+        if self.psr.fit_TN or self.psr.fit_OPV:
+
+            M = np.mean(self.hyp_chain, axis=0)
+            C = np.cov(self.hyp_chain, rowvar=False)
+            chi2 = np.einsum(
+                "ij,jk,ki->i",
+                (self.hyp_chain - M[None, :]),
+                np.linalg.inv(C),
+                (self.hyp_chain - M[None, :]).T,
+            )
+            idx = np.argmin(chi2)
+
+            self.hyp_MAP = self.hyp_chain[idx]
 
         self.phys_timing_MAP = (
             self.timing_parameter_values
@@ -496,7 +520,8 @@ class GibbsResults(object):
         fig = corner.corner(
             self.phys_timing_chain[:, :range_plot],
             labels=self.parameter_names[:range_plot],
-            truths=self.phys_timing_MAP[:range_plot],
+            truths=self.timing_parameter_values[:range_plot],
+            truth_color="red",
             hist_kwargs={"density": True},
             levels=mp_array,
             bins=30,
@@ -540,7 +565,7 @@ class GibbsResults(object):
             + [f"$\\mu_{i}$" for i in range(self.psr.npeaks)]
             + [f"$\\sigma_{i}$" for i in range(self.psr.npeaks)],
             truths=self.template_MAP[: 3 * self.psr.npeaks],
-            truths_color="C0",
+            truth_color="C0",
             levels=mp_array,
             bins=30,
             color="C0",
@@ -553,7 +578,7 @@ class GibbsResults(object):
                 + [f"$\\mu_{i}$" for i in range(self.psr.npeaks)]
                 + [f"$\\sigma_{i}$" for i in range(self.psr.npeaks)],
                 truths=self.template_MAP[3 * self.psr.npeaks :],
-                truths_color="C1",
+                truth_color="C1",
                 levels=mp_array,
                 bins=30,
                 color="C1",
