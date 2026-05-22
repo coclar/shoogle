@@ -1952,7 +1952,9 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         MT_Sigma_inv_M, MT_Sigma_inv_R = self.setup_leastsq_given_z_tau(mu_z, sigma_z)
         logprob_fn = lambda x: self.logprob_fn(x, MT_Sigma_inv_M, MT_Sigma_inv_R)
 
-        x = self._phys_to_samples(hyp)
+        # Clip to avoid getting too close the boundaries
+        x = jnp.clip(self._phys_to_samples(hyp), -10, 10)
+
         state = blackjax.nuts.init(x, logprob_fn)
 
         one_step = lambda state, key: self.kernel(
