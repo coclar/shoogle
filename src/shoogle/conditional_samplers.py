@@ -1461,9 +1461,17 @@ class TimingModelSampler(object):
 
         # Divide out the diagonal to make Cholesky decomposition more stable
         Dinv = 1.0 / jnp.sqrt(jnp.diag(post_cov_inv))
-        G = Dinv[:, None] * post_cov_inv * Dinv[None, :] + jnp.eye(len(Dinv)) * 1e-6
 
-        V = cholesky(G, lower=False)
+        G = Dinv[:, None] * post_cov_inv * Dinv[None, :]
+
+        L = jnp.linalg.eigvalsh(G)
+        min_eigval = 10 * jnp.finfo(jnp.float32).eps
+        beta = 1e6
+
+        # Adds a continuous-gradient lower bound to the lowest eigenvalue, enforcing positive-definiteness
+        regularisation = jax.nn.softplus(beta * (min_eigval - L[0])) / beta
+
+        V = cholesky(G + jnp.eye(len(G)) * regularisation, lower=False)
 
         theta_opt = Dinv * cho_solve((V, False), Dinv * RHS)
 
