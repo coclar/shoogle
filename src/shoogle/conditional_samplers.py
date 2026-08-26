@@ -504,14 +504,15 @@ class TemplateSampler(object):
         warmup = blackjax.window_adaptation(
             blackjax.nuts,
             logprob_fn,
-            progress_bar=True,
             target_acceptance_rate=0.9,
             is_mass_matrix_diagonal=True,
             max_num_doublings=10,
         )
 
         warmup_key, sample_key = jax.random.split(rng_key, 2)
-        (state, parameters), info = warmup.run(warmup_key, x0, num_steps=2000)
+
+        with blackjax.progress_bar(label="Template sampler tuning", print_rate=1):
+            (state, parameters), info = warmup.run(warmup_key, x0, num_steps=2000)
 
         self.nuts_params = parameters
         step_fn = blackjax.nuts.build_kernel()
@@ -1895,7 +1896,6 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         warmup = blackjax.window_adaptation(
             blackjax.nuts,
             logprob_fn,
-            progress_bar=True,
             target_acceptance_rate=0.9,
             is_mass_matrix_diagonal=False,
             max_num_doublings=15,
@@ -1903,7 +1903,9 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         )
 
         warmup_key, sample_key = jax.random.split(rng_key, 2)
-        (state, parameters), info = warmup.run(warmup_key, x0, num_steps=2000)
+
+        with blackjax.progress_bar(label="Hyperparameter sampler tuning", print_rate=1):
+            (state, parameters), info = warmup.run(warmup_key, x0, num_steps=2000)
 
         self.nuts_params = parameters
 
