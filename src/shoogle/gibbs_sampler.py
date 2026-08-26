@@ -1227,17 +1227,13 @@ class Gibbs(object):
                 hyp_diverged0 = samples[8]
                 hyp_step_size = samples[9]
 
-                if plots:
-                    if hyp_diverged0 or (hyp_accept0 < 0.2):
-                        print("Rejected", hyp_accept0, hyp_diverged0)
-                        print("Hyp:", hyp)
-                        print(
-                            "Final step size:",
-                            hyp_step_size,
-                            "(",
-                            self.timing_sampler.nuts_params["step_size"],
-                            ")",
-                        )
+                if hyp_diverged0:
+                    print(
+                        "Template sampler divergence: ",
+                        hyp_accept0,
+                        hyp_diverged0,
+                        hyp_step_size,
+                    )
 
                 if np.any(np.isnan(hyp)):
                     raise ValueError("Error: found a NaN in the hyperparameter samples")
