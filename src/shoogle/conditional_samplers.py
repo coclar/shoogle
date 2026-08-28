@@ -21,6 +21,9 @@ INVYR_TO_INVDAY = (1.0 / u.yr).to_value("1/d")
 
 from pint.templates.lcprimitives import LCPrimitive
 
+MAXWRAPS = 2
+wraps = jnp.arange(-MAXWRAPS, MAXWRAPS + 1)
+
 
 def new_default_bounds(self):
     bounds = [[] for _ in range(len(self.p))]
@@ -49,21 +52,44 @@ def dirichlet_to_unconstrained(A, K):
 
 
 def unconstrained_to_dirichlet(x, K, alpha=1.0):
+    """
+    Converts from unconstrained sampled variables to Dirichlet-distributed values
 
-    Bk = expit(x)
+    Sampled variables are logit(B), where B are Beta-distributed variables, between (0,1)
+    Each "B" value is the fraction of the remaining total used by the corresponding total
 
-    log_jac = jnp.sum(jnp.log(Bk * (1 - Bk)))
+    E.g.: If B[0] = 0.25, then the remainder R is 0.75.
+          If B[1] = 0.5, then the second component has size R * B[1] = 0.375
 
-    log_prior = beta.logpdf(Bk[0], alpha, K * alpha)
+    This function can take vectors longer than K.
+    Extra values are set to zero and ignored in prior calculations.
+    This enables parallelisation via vmap over pulsars with different K.
+    """
 
-    A = Bk.copy()
-    U = 1.0 - A[0]
-    for k in range(1, K):
-        log_prior += beta.logpdf(Bk[k], alpha, (K - k) * alpha)
-        A = A.at[k].set(Bk[k] * U)
-        U -= A[k]
+    L = jnp.shape(x)[0]
+    mask = jnp.arange(L) < K
 
-    return A, log_jac + log_prior
+    B = expit(x)
+    log_jac = jnp.sum(jnp.where(mask, jnp.log(B * (1 - B)), 0.0))
+
+    def scan_body(carry, Bk):
+        log_prior = carry[0]
+        R = carry[1]
+        k = carry[2]
+
+        valid = k < K
+        Bk_safe = jnp.where(valid, Bk, 0.5)
+        beta_safe = jnp.where(valid, (K - k) * alpha, 0.5)
+        log_prior_new = beta.logpdf(Bk_safe, alpha, beta_safe) * valid
+
+        A = Bk * R * valid
+        k += 1
+
+        return (log_prior + log_prior_new, R - A, k), A
+
+    (log_prior, _, _), A = jax.lax.scan(scan_body, (log_jac, 1.0, 0), B)
+
+    return A, log_prior
 
 
 def invgamma_to_unconstrained(s, logsmin, logsmax):
@@ -73,25 +99,168 @@ def invgamma_to_unconstrained(s, logsmin, logsmax):
     return logit(x01)
 
 
-def unconstrained_to_invgamma(x, logsmin, logsmax, alpha, beta):
+def unconstrained_to_invgamma(x, K, logsmin, logsmax, alpha, beta):
+    """
+    Converts from unconstrained variables to widths (sigma),
+    whose corresponding variances (sigma^2) have inverse-gamma distributions.
+
+    Unconstrained variables are logit(S),
+    where S is the fraction of the range between the min and max log-widths.
+
+    This can take vectors x that are longer than K.
+    Extra values are set to 1.0 and ignored in prior calculations.
+    This enables parallelisation via vmap over pulsars with different K.
+    """
+
+    L = jnp.shape(x)[0]
+    mask = jnp.arange(L) < K
 
     logs01 = expit(x)
-    log_jac = jnp.sum(jnp.log(logs01 * (1 - logs01)))
+    log_jac = jnp.sum(jnp.where(mask, jnp.log(logs01 * (1 - logs01)), 0.0))
 
-    logs = logsmin + logs01 * (logsmax - logsmin)
+    logs = (logsmin + logs01 * (logsmax - logsmin)) * mask
     s = jnp.exp(logs)
 
     # Converts to uniform distribution on sigma^2
-    log_jac += jnp.sum(2 * logs) + len(s) * jnp.log(2)
+    log_jac += jnp.sum(2 * logs * mask) + K * jnp.log(2)
 
     log_prior = jnp.sum(
-        alpha * jnp.log(beta)
-        - jax.scipy.special.gammaln(alpha)
-        - (alpha + 1) * jnp.log(s**2)
-        - beta / s**2
+        (
+            alpha * jnp.log(beta)
+            - jax.scipy.special.gammaln(alpha)
+            - (alpha + 1) * jnp.log(s**2)
+            - beta / s**2
+        )
+        * mask
     )
 
-    return s, log_jac + log_prior
+    # Need to re-normalise the distribution, since we have truncated at the min/max width
+    trunc_prob_lower = jax.scipy.special.gammaincc(alpha, beta / jnp.exp(2 * logsmin))
+    trunc_prob_upper = jax.scipy.special.gammainc(alpha, beta / jnp.exp(2 * logsmax))
+    trunc_factor = 1.0 - (trunc_prob_upper + trunc_prob_lower)
+
+    return s, log_jac + log_prior - K * jnp.log(trunc_factor)
+
+
+def jax_template(tau, phases, K):
+    """
+    Evaluates the pulse profile template at the provided phases.
+
+    Parameters
+    ----------
+
+    tau        : jax.numpy.ndarray of dtype float32, shape (3 * npeaks,)
+                 Template pulse profile parameters, in order:
+                 (amplitudes, positions, widths)
+
+                 Amplitudes should sum to < 1.0
+                 Positions should be between (0,1)
+                 Widths should be between the min and max values.
+
+                 For speed, these conditions are *not* checked here.
+                 The prior transforms used for sampling guarantee them.
+
+    phases     : jax.numpy.ndarray of dtype float32
+                 Array of photon phases. Should all be between 0 and 1.
+
+    Returns
+    ---------
+
+    profile    : jax.numpy.ndarray
+                 The pulse profile, evaluated at the input phases.
+    """
+
+    L = jnp.shape(tau)[0] // 3
+    mask = jnp.arange(L) < K
+
+    A = tau[:L] * mask
+    mu = tau[L : 2 * L]
+    sigma = tau[2 * L : 3 * L]
+
+    # Axes are (photons, peaks, wraps)
+    wrapped_resids = phases[:, None, None] - mu[None, :, None] - wraps[None, None, :]
+
+    # Unpulsed component
+    U = 1.0 - jnp.sum(A)
+
+    profile = U + jnp.sum(
+        (A * ONE_OVER_SQRT2PI / sigma)[None, :]
+        * jnp.sum(jnp.exp(-0.5 * (wrapped_resids / sigma[None, :, None]) ** 2), axis=2),
+        axis=1,
+    )
+
+    return profile
+
+
+def jax_template_Edep(tau, phases, log10E, K):
+    """
+    Evaluates the pulse profile template at the provided phases.
+
+    Parameters
+    ----------
+
+    tau        : jax.numpy.ndarray of dtype float32, shape (3 * npeaks,)
+                 Template pulse profile parameters, in order:
+                 (amplitudes, positions, widths)
+
+                 Amplitudes should sum to < 1.0
+                 Positions should be between (0,1)
+                 Widths should be between the min and max values.
+
+                 For speed, these conditions are *not* checked here.
+                 The prior transforms used for sampling guarantee them.
+
+    phases     : jax.numpy.ndarray of dtype float32
+                 Array of photon phases. Should all be between 0 and 1.
+
+    log10E     : jax.numpy.ndarray or None
+                 If None, uses the original log-energies
+                 Otherwise, evaluates at the specified log-energies
+
+    Returns
+    ---------
+
+    profile    : jax.numpy.ndarray
+                 The pulse profile, evaluated at the input phases.
+    """
+
+    log10E_frac = (log10E - log10E.min()) / (log10E.max() - log10E.min())
+
+    L = jnp.shape(tau)[0] // 6
+    mask = jnp.arange(L) < K
+
+    tau_lo = tau[: 3 * L]
+    tau_hi = tau[3 * L :]
+
+    A_lo = tau_lo[:L] * mask
+    A_hi = tau_hi[:L] * mask
+
+    # Ensure peak centres always shift the shortest way around the circle
+    mu_lo = tau_lo[L : 2 * L]
+    mu_hi = tau_hi[L : 2 * L]
+    mu_lo_wrapped = jnp.mod(mu_lo - mu_hi + 0.5, 1.0) - 0.5 + mu_hi
+
+    sigma_lo = tau_lo[2 * L :]
+    sigma_hi = tau_hi[2 * L :]
+
+    A_E = A_lo[None, :] + log10E_frac[:, None] * (A_hi - A_lo)[None, :]
+    mu_E = (
+        mu_lo_wrapped[None, :] + log10E_frac[:, None] * (mu_hi - mu_lo_wrapped)[None, :]
+    )
+    sigma_E = sigma_lo[None, :] + log10E_frac[:, None] * (sigma_hi - sigma_lo)[None, :]
+
+    U_E = 1.0 - jnp.sum(A_E, axis=1)
+
+    # Axes are (photons, peaks, wraps)
+    wrapped_resids = phases[:, None, None] - mu_E[:, :, None] - wraps[None, None, :]
+
+    profile = U_E + jnp.sum(
+        (A_E * ONE_OVER_SQRT2PI / sigma_E)
+        * jnp.sum(jnp.exp(-0.5 * (wrapped_resids / sigma_E[:, :, None]) ** 2), axis=2),
+        axis=1,
+    )
+
+    return profile
 
 
 def read_template(proffile, extra_phase=None):
@@ -173,7 +342,6 @@ class TemplateSampler(object):
         weights,
         minsigma=0.0001,
         maxsigma=0.5,
-        maxwraps=2,
         extra_phase=None,
     ):
         """
@@ -222,12 +390,11 @@ class TemplateSampler(object):
 
         self.npeaks = len(self.A_0)
 
-        self.maxwraps = maxwraps
-        self.wraps = jnp.arange(-2, 3)
-
         self.minlogsigma = jnp.log(minsigma)
         self.maxlogsigma = jnp.log(maxsigma)
         self.w = jnp.array(weights)
+
+        self.default_hyp = jnp.array([1.0, 1.0, 0.5, 3.0])
 
     def template(self, tau, phases):
         """
@@ -264,59 +431,9 @@ class TemplateSampler(object):
         tau = jnp.array(tau)
         phases = jnp.array(phases)
 
-        return self._jax_template(tau, phases)
+        return jax_template(tau, phases, self.npeaks)
 
-    def _jax_template(self, tau, phases):
-        """
-        Evaluates the pulse profile template at the provided phases.
-
-        Parameters
-        ----------
-
-        tau        : jax.numpy.ndarray of dtype float32, shape (3 * npeaks,)
-                     Template pulse profile parameters, in order:
-                     (amplitudes, positions, widths)
-
-                     Amplitudes should sum to < 1.0
-                     Positions should be between (0,1)
-                     Widths should be between the min and max values.
-
-                     For speed, these conditions are *not* checked here.
-                     The prior transforms used for sampling guarantee them.
-
-        phases     : jax.numpy.ndarray of dtype float32
-                     Array of photon phases. Should all be between 0 and 1.
-
-        Returns
-        ---------
-
-        profile    : jax.numpy.ndarray
-                     The pulse profile, evaluated at the input phases.
-        """
-
-        A = tau[: self.npeaks]
-        mu = tau[self.npeaks : self.npeaks * 2]
-        sigma = tau[self.npeaks * 2 :]
-
-        # Axes are (photons, peaks, wraps)
-        wrapped_resids = (
-            phases[:, None, None] - mu[None, :, None] - self.wraps[None, None, :]
-        )
-
-        # Unpulsed component
-        U = 1.0 - jnp.sum(A)
-
-        profile = U + jnp.sum(
-            (A * ONE_OVER_SQRT2PI / sigma)[None, :]
-            * jnp.sum(
-                jnp.exp(-0.5 * (wrapped_resids / sigma[None, :, None]) ** 2), axis=2
-            ),
-            axis=1,
-        )
-
-        return profile
-
-    def _samples_to_phys(self, x):
+    def _samples_to_phys(self, x, hyp):
         """
         Converts from parameters convenient for the sampler,
         which are logit-transformed to ranges of (-inf,inf),
@@ -340,11 +457,10 @@ class TemplateSampler(object):
                        and the Jacobian of the logit transforms.
         """
 
-        # 2.0 = slightly pushes amplitudes away from zero
-        amp_diri_alpha = 2.0
-
-        # 1.0 for the peak differences, equivalent to the hyper-triangular prior of PRD 100 084041
-        mu_diri_alpha = 1.0
+        amp_diri_alpha = hyp[0]
+        mu_diri_alpha = hyp[1]
+        invgamma_alpha = hyp[2]
+        min_SN = hyp[3]
 
         A, A_logprior = unconstrained_to_dirichlet(
             x[: self.npeaks], self.npeaks, amp_diri_alpha
@@ -362,18 +478,14 @@ class TemplateSampler(object):
         mu_logprior -= 0.5 * ((mu[0] - self.tau_0[self.npeaks]) ** 2 / mu_0_sigma**2)
 
         W2 = jnp.sum(self.w**2)
-        min_SN = 3.0
 
-        # Inverse-gamma distribution on sigma^2
-        # alpha = 1 is equivalent to a log-uniform prior on sigma^2 at high values
-        invgamma_alpha = 1.0
-
-        # This is roughly the width at which phase-averaged flux would be detected with 3-sigma significance
+        # This is roughly the width at which phase-averaged flux would be detected with (min_SN)-sigma significance
         # This prior penalises peaks that are significantly narrower than this scale
         invgamma_beta = (min_SN**2 / W2) ** 2
 
         sigma, sigma_logprior = unconstrained_to_invgamma(
             x[2 * self.npeaks : 3 * self.npeaks],
+            self.npeaks,
             self.minlogsigma,
             self.maxlogsigma,
             invgamma_alpha,
@@ -405,13 +517,12 @@ class TemplateSampler(object):
                      where the profile is the evaluated template.
         """
 
-        profile = self._jax_template(tau, phases)
-
+        profile = jax_template(tau, phases, self.npeaks)
         logL = jnp.sum(jnp.log(self.w * profile + (1 - self.w)))
 
         return logL
 
-    def _log_post(self, x, phases):
+    def _log_post(self, x, phases, hyp):
         """
         Computes the log-posterior probability of the template parameters
         given the observed photon phases and weights.
@@ -436,7 +547,7 @@ class TemplateSampler(object):
         log_post   : float
                      The log-posterior probability: log_prior + log_likelihood.
         """
-        tau, logprior = self._samples_to_phys(x)
+        tau, logprior = self._samples_to_phys(x, hyp)
         loglike = self._log_like(tau, phases)
 
         return logprior + loglike
@@ -488,8 +599,8 @@ class TemplateSampler(object):
         """
 
         x0 = self._phys_to_samples(self.tau_0)
-        logprob_fn = lambda x: self._log_post(x, phases)
-        neg_logprob_fn = lambda x: -self._log_post(x, phases)
+        logprob_fn = lambda x: self._log_post(x, phases, self.default_hyp)
+        neg_logprob_fn = lambda x: -self._log_post(x, phases, self.default_hyp)
 
         logL0 = logprob_fn(x0)
         optimiser = LBFGS(neg_logprob_fn)
@@ -498,7 +609,7 @@ class TemplateSampler(object):
         logL1 = logprob_fn(x1)
 
         print("Optimising template before burn-in:", logL0, "->", logL1)
-        self.tau_0 = self._samples_to_phys(x1)[0]
+        self.tau_0 = self._samples_to_phys(x1, self.default_hyp)[0]
         x0 = self._phys_to_samples(self.tau_0)
 
         warmup = blackjax.window_adaptation(
@@ -520,7 +631,7 @@ class TemplateSampler(object):
         @jax.jit
         def kernel(rng_key, state, phases, step_size):
 
-            logprob_fn = lambda x: self._log_post(x, phases)
+            logprob_fn = lambda x: self._log_post(x, phases, self.default_hyp)
             state, info = step_fn(
                 rng_key=rng_key,
                 state=state,
@@ -532,10 +643,9 @@ class TemplateSampler(object):
 
             return state, info
 
-        self.logprob_fn = jax.jit(self._log_post)
         self.kernel = kernel
 
-        return self._samples_to_phys(state.position)[0], sample_key
+        return self._samples_to_phys(state.position, self.default_hyp)[0], sample_key
 
     def sample(self, tau, phases, key, num_samples=1000):
         """
@@ -570,7 +680,7 @@ class TemplateSampler(object):
         # Make sure starting point isn't too close to a boundary
         x0 = jnp.clip(x0, -10, 10)
 
-        logprob_fn = lambda x: self._log_post(x, phases)
+        logprob_fn = lambda x: self._log_post(x, phases, self.default_hyp)
         state = blackjax.nuts.init(x0, logprob_fn)
 
         step_size = self.nuts_params["step_size"]
@@ -578,7 +688,7 @@ class TemplateSampler(object):
         tau_keys = jax.random.split(key, num_samples + 1)
 
         state, infos = jax.lax.scan(one_step, state, tau_keys[:-1])
-        sample = self._samples_to_phys(state.position)[0]
+        sample = self._samples_to_phys(state.position, self.default_hyp)[0]
         return (
             sample,
             tau_keys[-1],
@@ -713,6 +823,8 @@ class EdepTemplateSampler(TemplateSampler):
             self.log10E.max() - self.log10E.min()
         )
 
+        self.default_hyp = jnp.array([1.5, 1.5, 0.1, 3.0, 0.5, 0.01, 0.5])
+
     def template(self, tau, phases, log10E):
         """
         Evaluates the pulse profile template, checking the amplitude constraints
@@ -756,88 +868,9 @@ class EdepTemplateSampler(TemplateSampler):
         phases = jnp.array(phases)
         log10E = jnp.array(log10E)
 
-        return self._jax_template(tau, phases, log10E)
+        return jax_template_Edep(tau, phases, log10E, self.npeaks)
 
-    def _jax_template(self, tau, phases, log10E=None):
-        """
-        Evaluates the pulse profile template at the provided phases.
-
-        Parameters
-        ----------
-
-        tau        : jax.numpy.ndarray of dtype float32, shape (3 * npeaks,)
-                     Template pulse profile parameters, in order:
-                     (amplitudes, positions, widths)
-
-                     Amplitudes should sum to < 1.0
-                     Positions should be between (0,1)
-                     Widths should be between the min and max values.
-
-                     For speed, these conditions are *not* checked here.
-                     The prior transforms used for sampling guarantee them.
-
-        phases     : jax.numpy.ndarray of dtype float32
-                     Array of photon phases. Should all be between 0 and 1.
-
-        log10E     : jax.numpy.ndarray or None
-                     If None, uses the original log-energies
-                     Otherwise, evaluates at the specified log-energies
-
-        Returns
-        ---------
-
-        profile    : jax.numpy.ndarray
-                     The pulse profile, evaluated at the input phases.
-        """
-
-        if log10E is None:
-            log10E_frac = self.log10E_frac
-        else:
-            log10E_frac = (log10E - self.log10E.min()) / (
-                self.log10E.max() - self.log10E.min()
-            )
-
-        tau_lo = tau[: 3 * self.npeaks]
-        tau_hi = tau[3 * self.npeaks :]
-
-        A_lo = tau_lo[: self.npeaks]
-        A_hi = tau_hi[: self.npeaks]
-
-        # Ensure peak centres always shift the shortest way around the circle
-        mu_lo = tau_lo[self.npeaks : 2 * self.npeaks]
-        mu_hi = tau_hi[self.npeaks : 2 * self.npeaks]
-        mu_lo_wrapped = jnp.mod(mu_lo - mu_hi + 0.5, 1.0) - 0.5 + mu_hi
-
-        sigma_lo = tau_lo[2 * self.npeaks :]
-        sigma_hi = tau_hi[2 * self.npeaks :]
-
-        A_E = A_lo[None, :] + log10E_frac[:, None] * (A_hi - A_lo)[None, :]
-        mu_E = (
-            mu_lo_wrapped[None, :]
-            + log10E_frac[:, None] * (mu_hi - mu_lo_wrapped)[None, :]
-        )
-        sigma_E = (
-            sigma_lo[None, :] + log10E_frac[:, None] * (sigma_hi - sigma_lo)[None, :]
-        )
-
-        U_E = 1.0 - jnp.sum(A_E, axis=1)
-
-        # Axes are (photons, peaks, wraps)
-        wrapped_resids = (
-            phases[:, None, None] - mu_E[:, :, None] - self.wraps[None, None, :]
-        )
-
-        profile = U_E + jnp.sum(
-            (A_E * ONE_OVER_SQRT2PI / sigma_E)
-            * jnp.sum(
-                jnp.exp(-0.5 * (wrapped_resids / sigma_E[:, :, None]) ** 2), axis=2
-            ),
-            axis=1,
-        )
-
-        return profile
-
-    def _samples_to_phys(self, x):
+    def _samples_to_phys(self, x, hyp):
         """
         Converts from parameters convenient for the sampler,
         which are logit-transformed to ranges of (-inf,inf),
@@ -861,9 +894,8 @@ class EdepTemplateSampler(TemplateSampler):
                        and the Jacobian of the logit transforms.
         """
 
-        # Assuming A_lo ~ A_hi, then we don't want to double-count the prior on alpha
-        # If A_lo = A_hi, then alpha = 1.5 is equivalent to alpha = 2.0 for a single amplitude
-        amp_diri_alpha = 1.5
+        # Amplitudes --------------------------------------------------------------
+        amp_diri_alpha = hyp[0]
 
         A_lo, A_lo_logprior = unconstrained_to_dirichlet(
             x[: self.npeaks], self.npeaks, amp_diri_alpha
@@ -872,8 +904,19 @@ class EdepTemplateSampler(TemplateSampler):
             x[3 * self.npeaks : 4 * self.npeaks], self.npeaks, amp_diri_alpha
         )
 
+        logamp_diff_prior_sigma = hyp[4] * (self.log10E.max() - self.log10E.min())
+
+        logamp_diff_prior = -0.5 * (
+            self.npeaks * jnp.log(2 * jnp.pi)
+            + self.npeaks * 2 * jnp.log(logamp_diff_prior_sigma)
+            + jnp.sum((jnp.log(A_lo) - jnp.log(A_hi)) ** 2 / logamp_diff_prior_sigma**2)
+        )
+        # ------------------------------------------------------------------------
+        # Locations
+        mu_diri_alpha = hyp[1]
+
         mu_mid_diffs, mu_logprior = unconstrained_to_dirichlet(
-            x[self.npeaks + 1 : 2 * self.npeaks], self.npeaks - 1, 1.0
+            x[self.npeaks + 1 : 2 * self.npeaks], self.npeaks - 1, mu_diri_alpha
         )
 
         mu_mid_0 = x[self.npeaks]
@@ -890,18 +933,24 @@ class EdepTemplateSampler(TemplateSampler):
         mu_hi = mu_mid + mu_diff
 
         # Prevent hi/lo energy peaks from differing too much
-        mu_logprior -= 0.5 * jnp.sum(mu_diff**2 / 0.05**2)
+        mu_diff_prior_sigma = hyp[5] * (self.log10E.max() - self.log10E.min())
 
-        # If sigma_lo = sigma_hi, then summing the lo/hi logprior is equivalent to having
-        # alpha_total -> 2 * alpha + 1 and beta_total -> 2 * beta
-        # alpha = 0.0 is unphysical (Gamma(alpha) explodes as alpha -> 0), so set it to something small but non-zero
-        invgamma_alpha = 0.1
-        min_SN = 3.0
+        mu_diff_prior = -0.5 * (
+            self.npeaks * jnp.log(2 * jnp.pi)
+            + self.npeaks * 2 * jnp.log(mu_diff_prior_sigma)
+            + jnp.sum((2 * mu_diff) ** 2 / mu_diff_prior_sigma**2)
+        )
+        # -----------------------------------------------------------------------
+        # Widths
+
+        invgamma_alpha = hyp[2]
+        min_SN = hyp[3]
         W2 = jnp.sum(self.w**2)
-        invgamma_beta = 0.5 * (min_SN**2 / W2) ** 2
+        invgamma_beta = (min_SN**2 / W2) ** 2
 
         sigma_lo, sigma_lo_logprior = unconstrained_to_invgamma(
             x[2 * self.npeaks : 3 * self.npeaks],
+            self.npeaks,
             self.minlogsigma,
             self.maxlogsigma,
             invgamma_alpha,
@@ -910,11 +959,24 @@ class EdepTemplateSampler(TemplateSampler):
 
         sigma_hi, sigma_hi_logprior = unconstrained_to_invgamma(
             x[5 * self.npeaks : 6 * self.npeaks],
+            self.npeaks,
             self.minlogsigma,
             self.maxlogsigma,
             invgamma_alpha,
             invgamma_beta,
         )
+
+        logsigma_diff_prior_sigma = hyp[6] * (self.log10E.max() - self.log10E.min())
+
+        logsigma_diff_prior = -0.5 * (
+            self.npeaks * jnp.log(2 * jnp.pi)
+            + self.npeaks * 2 * jnp.log(logsigma_diff_prior_sigma)
+            + jnp.sum(
+                (jnp.log(sigma_lo) - jnp.log(sigma_hi)) ** 2
+                / logsigma_diff_prior_sigma**2
+            )
+        )
+        # ----------------------------------------------------------------------
 
         tau = jnp.concatenate((A_lo, mu_lo, sigma_lo, A_hi, mu_hi, sigma_hi))
 
@@ -922,9 +984,12 @@ class EdepTemplateSampler(TemplateSampler):
             tau,
             A_lo_logprior
             + A_hi_logprior
+            + logamp_diff_prior
             + mu_logprior
+            + mu_diff_prior
             + sigma_lo_logprior
-            + sigma_hi_logprior,
+            + sigma_hi_logprior
+            + logsigma_diff_prior,
         )
 
     def _phys_to_samples(self, tau):
@@ -981,6 +1046,31 @@ class EdepTemplateSampler(TemplateSampler):
         )
 
         return x
+
+    def _log_like(self, tau, phases):
+        """
+        Computes the log-likelihood of the observed photon phases given the
+        pulse profile template parameters and photon weights.
+
+        Parameters
+        ----------
+        tau        : jax.numpy.ndarray
+                     Array of pulse profile parameters
+        phases     : jax.numpy.ndarray
+                     Array of observed photon phases (in [0, 1]).
+
+        Returns
+        -------
+        logL       : float
+                     The log-likelihood of the data given the template parameters.
+                     This is the sum over photons of log(weights * profile + (1 - weights)),
+                     where the profile is the evaluated template.
+        """
+
+        profile = jax_template_Edep(tau, phases, self.log10E, self.npeaks)
+        logL = jnp.sum(jnp.log(self.w * profile + (1 - self.w)))
+
+        return logL
 
     def unswap_peaks(self, tau):
 
