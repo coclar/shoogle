@@ -1357,7 +1357,15 @@ class TimingModelSampler(object):
     """A class for obtaining random samples of the timing model, given the
     latent variables and template pulse profile"""
 
-    def __init__(self, phi, M, theta_prior):
+    def __init__(
+        self,
+        phi,
+        M,
+        theta_prior,
+        radio_resids=None,
+        radio_resid_uncertainties=None,
+        Mradio=None,
+    ):
         """
         Parameters
         ----------
@@ -1376,6 +1384,15 @@ class TimingModelSampler(object):
         self.npar = np.shape(M)[1]
         self.M = jnp.array(M)
         self.theta_prior = jnp.array(theta_prior)
+
+        self.has_radio = False
+
+        if radio_resids is not None:
+            self.has_radio = True
+            self.radio_resids = jnp.array(radio_resids)
+            self.radio_resid_uncertainties = jnp.array(radio_resid_uncertainties)
+            self.Mradio = jnp.array(Mradio)
+            self.M = jnp.append(self.M, self.Mradio, axis=0)
 
     def setup_leastsq_given_z_tau(self, mu_z, sigma_z):
         """
@@ -1403,6 +1420,10 @@ class TimingModelSampler(object):
 
         resids = self.phi - mu_z
         precisions = jnp.where(sigma_z > 0, 1.0 / sigma_z**2, 0.0)
+
+        if self.has_radio:
+            resids = jnp.append(resids, self.radio_resids)
+            precisions = jnp.append(precisions, self.radio_resid_uncertainties**-2)
 
         MT_Sigma_inv_M = self.M.T @ (precisions[:, None] * self.M)
         MT_Sigma_inv_R = self.M.T @ (precisions * resids)
@@ -1515,7 +1536,7 @@ class TimingModelSampler(object):
         theta_key, key = jax.random.split(key)
         p = jax.random.normal(theta_key, (len(MT_Sigma_inv_R),))
         theta = theta_opt + Dinv * solve_triangular(V, p, lower=False)
-        phase_shifts = self.M @ theta
+        phase_shifts = (self.M @ theta)[: len(self.phi)]
         phase_shifts -= jnp.mean(phase_shifts)
 
         return theta, phase_shifts, key
@@ -1620,6 +1641,9 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         noise_models,
         parameter_scales,
         PB0=None,
+        radio_resids=None,
+        radio_resid_uncertainties=None,
+        Mradio=None,
     ):
         """
         Parameters
@@ -1706,6 +1730,15 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
         self.fixed_hyp = jnp.array(hyp0)
         self.min_freqs = jnp.array(min_freqs)
         self.linear_priors = jnp.array(linear_priors)
+
+        self.has_radio = False
+
+        if radio_resids is not None:
+            self.has_radio = True
+            self.radio_resids = jnp.array(radio_resids)
+            self.radio_resid_uncertainties = jnp.array(radio_resid_uncertainties)
+            self.Mradio = jnp.array(Mradio)
+            self.M = jnp.append(self.M, self.Mradio, axis=0)
 
     def _phys_to_samples(self, hyp):
         """

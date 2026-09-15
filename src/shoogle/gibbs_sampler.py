@@ -134,7 +134,7 @@ class Gibbs(object):
         )
         if timfile is not None:
             self.radio_toas = toa.get_TOAs(timfile, planets=True)
-            self.radio_toa_uncerts = np.asarray(
+            self.radio_resid_uncertainties = np.asarray(
                 (self.radio_toas.get_errors() * self.timing_model.F0.quantity).to(
                     u.dimensionless_unscaled
                 ),
@@ -319,7 +319,13 @@ class Gibbs(object):
             self.radio_resids = np.asarray(
                 self.timing_model.phase(self.radio_toas).frac, dtype=float
             )
-            self.radio_resids -= np.mean(self.radio_resids)
+            self.radio_resids -= np.average(
+                self.radio_resids, weights=1.0 / self.radio_resid_uncertainties**2
+            )
+        else:
+            self.radio_resids = None
+            self.radio_resid_uncertainties = None
+            self.Mradio = None
 
         if self.nhyp > 0:
             if self.has_OPV:
@@ -335,9 +341,19 @@ class Gibbs(object):
                 self.noise_models,
                 self.parameter_scales,
                 PB0,
+                self.radio_resids,
+                self.radio_resid_uncertainties,
+                self.Mradio,
             )
         else:
-            self.timing_sampler = TimingModelSampler(self.phi, self.M, self.theta_prior)
+            self.timing_sampler = TimingModelSampler(
+                self.phi,
+                self.M,
+                self.theta_prior,
+                self.radio_resids,
+                self.radio_resid_uncertainties,
+                self.Mradio,
+            )
 
         return
 
@@ -513,7 +529,7 @@ class Gibbs(object):
 
         if hasattr(self, "radio_toas"):
             resids = np.append(resids, self.radio_resids)
-            precisions = np.append(precisions, self.radio_toa_uncerts**-2)
+            precisions = np.append(precisions, self.radio_resid_uncertainties**-2)
             M = np.append(M, self.Mradio, axis=0)
 
         MT_Sigma_inv = np.einsum("ij,j->ij", M.T, precisions, optimize="greedy")
@@ -683,7 +699,7 @@ class Gibbs(object):
 
         pint_pars = self.timing_model.get_params_dict()
         for i, name in enumerate(self.timing_parameter_names):
-            if name == "Offset":
+            if name == "Offset" or name == "RG_Offset":
                 continue
 
             par = pint_pars[name]

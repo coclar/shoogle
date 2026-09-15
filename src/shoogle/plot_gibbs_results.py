@@ -608,7 +608,7 @@ class GibbsResults(object):
         ax[0, 0].errorbar(
             self.psr.radio_t,
             self.psr.radio_resids,
-            yerr=self.psr.radio_toa_uncerts,
+            yerr=self.psr.radio_resid_uncertainties,
             color="red",
             ls="none",
             marker="x",
@@ -616,7 +616,7 @@ class GibbsResults(object):
         ax[1, 0].errorbar(
             self.psr.radio_t,
             self.radio_resids_MAP,
-            yerr=self.psr.radio_toa_uncerts,
+            yerr=self.psr.radio_resid_uncertainties,
             color="green",
             ls="none",
             marker="x",
@@ -624,7 +624,7 @@ class GibbsResults(object):
         ax[0, 1].errorbar(
             ophi,
             self.psr.radio_resids,
-            yerr=self.psr.radio_toa_uncerts,
+            yerr=self.psr.radio_resid_uncertainties,
             color="red",
             ls="none",
             marker="x",
@@ -632,7 +632,7 @@ class GibbsResults(object):
         ax[1, 1].errorbar(
             ophi,
             self.radio_resids_MAP,
-            yerr=self.psr.radio_toa_uncerts,
+            yerr=self.psr.radio_resid_uncertainties,
             color="green",
             ls="none",
             marker="x",
@@ -761,11 +761,11 @@ class GibbsResults(object):
 
         TASCidx = np.where(self.parameter_names == "TASC")[0]
         try:
-            FB0idx = np.where(self.parameter_names == "FB0")[0]
+            FB0idx = [np.where(self.parameter_names == "FB0")[0][0]]
         except:
-            FB0idx = np.where(self.parameter_names == "PB")[0]
-        FB1idx = np.where(self.parameter_names == "FB1")[0]
+            FB0idx = [np.where(self.parameter_names == "PB")[0][0]]
 
+        FB1idx = np.where(self.parameter_names == "FB1")[0]
         idxs = np.concatenate(
             (TASCidx, FB0idx, FB1idx, self.psr.OPVCinds, self.psr.OPVSinds)
         )
@@ -1355,7 +1355,7 @@ class GibbsResults(object):
             ) * u.s**2
 
             psd_f = self.psr.WXfreqs
-            psd = (0.5 * powers / (psd_f[1] - psd_f[0])).to_value(yunits)
+            psd = (powers / (psd_f[1] - psd_f[0])).to_value(yunits)
 
             # Pick the last point in the chain as a reproducible,
             # but "random" sample from which to estimate the WN level
@@ -1421,7 +1421,7 @@ class GibbsResults(object):
             powers = (OPV_amps[:, ::2] ** 2 + OPV_amps[:, 1::2] ** 2) * self.psr.PB0**2
 
             psd_f = self.psr.OPVfreqs
-            psd = (0.5 * powers / (psd_f[1] - psd_f[0])).to_value(yunits)
+            psd = (powers / (psd_f[1] - psd_f[0])).to_value(yunits)
 
             # Pick the last point in the chain as a reproducible,
             # but "random" sample from which to estimate the WN level
