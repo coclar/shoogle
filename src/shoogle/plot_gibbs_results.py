@@ -600,11 +600,10 @@ class GibbsResults(object):
         if ax is None:
             fig, ax = plt.subplots(2, 2, sharex="col", figsize=(15, 10))
 
-        ophi = np.mod(
-            (self.psr.radio_t - self.psr.timing_model.TASC.quantity.tdb.mjd)
-            / self.psr.PB0.to_value("d"),
-            1.0,
+        ophi = self.MAP_timing_model.orbital_phase(
+            self.psr.radio_toas, anom="mean", radians=False
         )
+
         ax[0, 0].errorbar(
             self.psr.radio_t,
             self.psr.radio_resids,
@@ -1553,7 +1552,7 @@ class GibbsResults(object):
 
         ax.plot(f.to_value(xunits), np.median(fit_psd, axis=1), color="red", zorder=0)
 
-        med_psd = np.median(psd, axis=0)
+        med_psd = np.mean(psd, axis=0) / 2.0
         psd_err_lo = med_psd - np.quantile(psd, norm.cdf(-1.0), axis=0)
         psd_err_hi = np.quantile(psd, norm.cdf(1.0), axis=0) - med_psd
 
@@ -1564,7 +1563,9 @@ class GibbsResults(object):
             color="black",
             linestyle="none",
             zorder=2,
+            marker="x",
         )
+
         # psd_err_lo = med_psd - np.quantile(psd, norm.cdf(-1.0), axis=0)
         # psd_err_hi = np.quantile(psd, norm.cdf(1.0), axis=0) - med_psd
 

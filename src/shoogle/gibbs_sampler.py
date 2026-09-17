@@ -767,7 +767,6 @@ class Gibbs(object):
 
         if hasattr(self, "radio_toas"):
             Mradio *= self.timing_model.F0.value
-            self.radio_dphi_dtasc = Mradio[:, tasc_idx] / 86400.0
             self.Mradio = np.asarray(Mradio, dtype=float)
             self.parameter_scales = np.maximum(
                 np.max(np.abs(self.M), axis=0), np.max(np.abs(self.Mradio), axis=0)

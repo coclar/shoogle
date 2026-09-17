@@ -158,5 +158,9 @@ def main(argv=None):
         fig5, ax = res.plot_Edep_profiles()
         plt.savefig(options.outputfile + "_Edep_prof" + endfile, bbox_inches="tight")
 
+    if options.radio_toas is not None:
+        ax = res.plot_radio_resids()
+        plt.savefig(options.outputfile + "_radio" + endfile, bbox_inches="tight")
+
     if not options.quiet:
         plt.show()
