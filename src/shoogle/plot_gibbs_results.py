@@ -597,12 +597,18 @@ class GibbsResults(object):
 
     def plot_radio_resids(self, ax=None):
 
-        if ax is None:
-            fig, ax = plt.subplots(2, 2, sharex="col", figsize=(15, 10))
-
         ophi = self.MAP_timing_model.orbital_phase(
             self.psr.radio_toas, anom="mean", radians=False
         )
+
+        if ax is None:
+            if ophi is None:
+                fig, ax = plt.subplots(2, 1, sharex="col", figsize=(10, 10))
+                ax = ax[:, None]
+            else:
+                fig, ax = plt.subplots(
+                    2, 2, sharex="col", sharey="row", figsize=(15, 10)
+                )
 
         ax[0, 0].errorbar(
             self.psr.radio_t,
@@ -620,29 +626,32 @@ class GibbsResults(object):
             ls="none",
             marker="x",
         )
-        ax[0, 1].errorbar(
-            ophi,
-            self.psr.radio_resids,
-            yerr=self.psr.radio_resid_uncertainties,
-            color="red",
-            ls="none",
-            marker="x",
-        )
-        ax[1, 1].errorbar(
-            ophi,
-            self.radio_resids_MAP,
-            yerr=self.psr.radio_resid_uncertainties,
-            color="green",
-            ls="none",
-            marker="x",
-        )
 
         ax[1, 0].set_xlabel("Time (MJD)")
-        ax[1, 1].set_xlabel("Orbital phase")
         ax[0, 0].set_ylabel("Pre-fit residual")
         ax[1, 0].set_ylabel("Post-fit residual")
-        ax[0, 1].set_ylabel("Pre-fit residual")
-        ax[1, 1].set_ylabel("Post-fit residual")
+
+        if ophi is not None:
+            ax[0, 1].errorbar(
+                ophi,
+                self.psr.radio_resids,
+                yerr=self.psr.radio_resid_uncertainties,
+                color="red",
+                ls="none",
+                marker="x",
+            )
+            ax[1, 1].errorbar(
+                ophi,
+                self.radio_resids_MAP,
+                yerr=self.psr.radio_resid_uncertainties,
+                color="green",
+                ls="none",
+                marker="x",
+            )
+
+            ax[1, 1].set_xlabel("Orbital phase")
+            ax[0, 1].set_ylabel("Pre-fit residual")
+            ax[1, 1].set_ylabel("Post-fit residual")
 
         return ax
 
@@ -1563,7 +1572,6 @@ class GibbsResults(object):
             color="black",
             linestyle="none",
             zorder=2,
-            marker="x",
         )
 
         # psd_err_lo = med_psd - np.quantile(psd, norm.cdf(-1.0), axis=0)
