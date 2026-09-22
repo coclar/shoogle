@@ -51,7 +51,7 @@ def dirichlet_to_unconstrained(A, K):
     return logit(Bk)
 
 
-def unconstrained_to_dirichlet(x, K, alpha=1.0):
+def unconstrained_to_dirichlet(x, K, alpha_P=1.0, alpha_U=1.0):
     """
     Converts from unconstrained sampled variables to Dirichlet-distributed values
 
@@ -79,8 +79,8 @@ def unconstrained_to_dirichlet(x, K, alpha=1.0):
 
         valid = k < K
         Bk_safe = jnp.where(valid, Bk, 0.5)
-        beta_safe = jnp.where(valid, (K - k) * alpha, 0.5)
-        log_prior_new = beta.logpdf(Bk_safe, alpha, beta_safe) * valid
+        beta_safe = jnp.where(valid, (K - (k + 1)) * alpha_P + alpha_U, 0.5)
+        log_prior_new = beta.logpdf(Bk_safe, alpha_P, beta_safe) * valid
 
         A = Bk * R * valid
         k += 1
@@ -192,7 +192,7 @@ def jax_template(tau, phases, K):
     return profile
 
 
-def jax_template_Edep(tau, phases, log10E, K):
+def jax_template_Edep(tau, phases, log10E_frac, K):
     """
     Evaluates the pulse profile template at the provided phases.
 
@@ -223,8 +223,6 @@ def jax_template_Edep(tau, phases, log10E, K):
     profile    : jax.numpy.ndarray
                  The pulse profile, evaluated at the input phases.
     """
-
-    log10E_frac = (log10E - log10E.min()) / (log10E.max() - log10E.min())
 
     L = jnp.shape(tau)[0] // 6
     mask = jnp.arange(L) < K
@@ -394,7 +392,7 @@ class TemplateSampler(object):
         self.maxlogsigma = jnp.log(maxsigma)
         self.w = jnp.array(weights)
 
-        self.default_hyp = jnp.array([1.0, 1.0, 0.5, 3.0])
+        self.default_hyp = jnp.array([1.0, 1.0, 1.0, 0.5, 3.0])
 
     def template(self, tau, phases):
         """
@@ -458,16 +456,20 @@ class TemplateSampler(object):
         """
 
         amp_diri_alpha = hyp[0]
-        mu_diri_alpha = hyp[1]
-        invgamma_alpha = hyp[2]
-        min_SN = hyp[3]
+        U_diri_alpha = hyp[1]
+        mu_diri_alpha = hyp[2]
+        invgamma_alpha = hyp[3]
+        min_SN = hyp[4]
 
         A, A_logprior = unconstrained_to_dirichlet(
-            x[: self.npeaks], self.npeaks, amp_diri_alpha
+            x[: self.npeaks], self.npeaks, amp_diri_alpha, U_diri_alpha
         )
 
         mu_diffs, mu_logprior = unconstrained_to_dirichlet(
-            x[self.npeaks + 1 : 2 * self.npeaks], self.npeaks - 1, mu_diri_alpha
+            x[self.npeaks + 1 : 2 * self.npeaks],
+            self.npeaks - 1,
+            mu_diri_alpha,
+            mu_diri_alpha,
         )
 
         mu0 = x[self.npeaks][None]
@@ -819,11 +821,14 @@ class EdepTemplateSampler(TemplateSampler):
 
         self.tau_0 = jnp.concatenate((self.tau_0, self.tau_0))
         self.log10E = jnp.array(log10E)
-        self.log10E_frac = (self.log10E - self.log10E.min()) / (
-            self.log10E.max() - self.log10E.min()
+
+        self.log10Emax = self.log10E.max()
+        self.log10Emin = self.log10E.min()
+        self.log10E_frac = (self.log10E - self.log10Emin) / (
+            self.log10Emax - self.log10Emin
         )
 
-        self.default_hyp = jnp.array([1.5, 1.5, 0.1, 3.0, 0.5, 0.01, 0.5])
+        self.default_hyp = jnp.array([1.5, 1.5, 1.5, 0.1, 3.0, 0.5, 0.01, 0.5])
 
     def template(self, tau, phases, log10E):
         """
@@ -866,9 +871,11 @@ class EdepTemplateSampler(TemplateSampler):
 
         tau = jnp.array(tau)
         phases = jnp.array(phases)
-        log10E = jnp.array(log10E)
+        log10E_frac = (jnp.array(log10E) - self.log10Emin) / (
+            self.log10Emax - self.log10Emin
+        )
 
-        return jax_template_Edep(tau, phases, log10E, self.npeaks)
+        return jax_template_Edep(tau, phases, log10E_frac, self.npeaks)
 
     def _samples_to_phys(self, x, hyp):
         """
@@ -896,15 +903,19 @@ class EdepTemplateSampler(TemplateSampler):
 
         # Amplitudes --------------------------------------------------------------
         amp_diri_alpha = hyp[0]
+        U_diri_alpha = hyp[1]
 
         A_lo, A_lo_logprior = unconstrained_to_dirichlet(
-            x[: self.npeaks], self.npeaks, amp_diri_alpha
+            x[: self.npeaks], self.npeaks, amp_diri_alpha, U_diri_alpha
         )
         A_hi, A_hi_logprior = unconstrained_to_dirichlet(
-            x[3 * self.npeaks : 4 * self.npeaks], self.npeaks, amp_diri_alpha
+            x[3 * self.npeaks : 4 * self.npeaks],
+            self.npeaks,
+            amp_diri_alpha,
+            U_diri_alpha,
         )
 
-        logamp_diff_prior_sigma = hyp[4] * (self.log10E.max() - self.log10E.min())
+        logamp_diff_prior_sigma = hyp[5] * (self.log10E.max() - self.log10E.min())
 
         logamp_diff_prior = -0.5 * (
             self.npeaks * jnp.log(2 * jnp.pi)
@@ -913,10 +924,13 @@ class EdepTemplateSampler(TemplateSampler):
         )
         # ------------------------------------------------------------------------
         # Locations
-        mu_diri_alpha = hyp[1]
+        mu_diri_alpha = hyp[2]
 
         mu_mid_diffs, mu_logprior = unconstrained_to_dirichlet(
-            x[self.npeaks + 1 : 2 * self.npeaks], self.npeaks - 1, mu_diri_alpha
+            x[self.npeaks + 1 : 2 * self.npeaks],
+            self.npeaks - 1,
+            mu_diri_alpha,
+            mu_diri_alpha,
         )
 
         mu_mid_0 = x[self.npeaks]
@@ -933,7 +947,7 @@ class EdepTemplateSampler(TemplateSampler):
         mu_hi = mu_mid + mu_diff
 
         # Prevent hi/lo energy peaks from differing too much
-        mu_diff_prior_sigma = hyp[5] * (self.log10E.max() - self.log10E.min())
+        mu_diff_prior_sigma = hyp[6] * (self.log10E.max() - self.log10E.min())
 
         mu_diff_prior = -0.5 * (
             self.npeaks * jnp.log(2 * jnp.pi)
@@ -943,8 +957,8 @@ class EdepTemplateSampler(TemplateSampler):
         # -----------------------------------------------------------------------
         # Widths
 
-        invgamma_alpha = hyp[2]
-        min_SN = hyp[3]
+        invgamma_alpha = hyp[3]
+        min_SN = hyp[4]
         W2 = jnp.sum(self.w**2)
         invgamma_beta = (min_SN**2 / W2) ** 2
 
@@ -966,7 +980,7 @@ class EdepTemplateSampler(TemplateSampler):
             invgamma_beta,
         )
 
-        logsigma_diff_prior_sigma = hyp[6] * (self.log10E.max() - self.log10E.min())
+        logsigma_diff_prior_sigma = hyp[7] * (self.log10E.max() - self.log10E.min())
 
         logsigma_diff_prior = -0.5 * (
             self.npeaks * jnp.log(2 * jnp.pi)
@@ -1067,7 +1081,7 @@ class EdepTemplateSampler(TemplateSampler):
                      where the profile is the evaluated template.
         """
 
-        profile = jax_template_Edep(tau, phases, self.log10E, self.npeaks)
+        profile = jax_template_Edep(tau, phases, self.log10E_frac, self.npeaks)
         logL = jnp.sum(jnp.log(self.w * profile + (1 - self.w)))
 
         return logL
