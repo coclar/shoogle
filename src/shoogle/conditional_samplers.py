@@ -456,7 +456,10 @@ class TemplateSampler(object):
         """
 
         amp_diri_alpha = hyp[0]
-        U_diri_alpha = hyp[1]
+
+        U_mean = hyp[1]
+        U_diri_alpha = U_mean * self.npeaks * amp_diri_alpha / (1.0 - U_mean)
+
         mu_diri_alpha = hyp[2]
         invgamma_alpha = hyp[3]
         min_SN = hyp[4]
@@ -828,7 +831,7 @@ class EdepTemplateSampler(TemplateSampler):
             self.log10Emax - self.log10Emin
         )
 
-        self.default_hyp = jnp.array([1.5, 1.5, 1.5, 0.1, 3.0, 0.5, 0.01, 0.5])
+        self.default_hyp = jnp.array([1.5, 0.1, 1.0, 0.05, 3.0, 0.5, 0.01, 0.5])
 
     def template(self, tau, phases, log10E):
         """
@@ -903,7 +906,9 @@ class EdepTemplateSampler(TemplateSampler):
 
         # Amplitudes --------------------------------------------------------------
         amp_diri_alpha = hyp[0]
-        U_diri_alpha = hyp[1]
+        U_mean = hyp[1]
+
+        U_diri_alpha = U_mean * self.npeaks * amp_diri_alpha / (1.0 - U_mean)
 
         A_lo, A_lo_logprior = unconstrained_to_dirichlet(
             x[: self.npeaks], self.npeaks, amp_diri_alpha, U_diri_alpha
@@ -960,7 +965,7 @@ class EdepTemplateSampler(TemplateSampler):
         invgamma_alpha = hyp[3]
         min_SN = hyp[4]
         W2 = jnp.sum(self.w**2)
-        invgamma_beta = (min_SN**2 / W2) ** 2
+        invgamma_beta = 0.5 * (min_SN**2 / W2) ** 2
 
         sigma_lo, sigma_lo_logprior = unconstrained_to_invgamma(
             x[2 * self.npeaks : 3 * self.npeaks],
