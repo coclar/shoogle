@@ -46,7 +46,7 @@ class NoiseModel(object):
 
         self.linear_amp_prior = False
 
-        if len(self.x0) != len(self.free) != self.npar:
+        if len(self.x0) != self.npar or len(self.free) != self.npar:
             raise ValueError("Incorrect number of hyperparameters specified")
 
         self.prefix = prefix
@@ -313,17 +313,24 @@ class FlatTailBrokenPowerLaw(NoiseModel):
             f = self.freqs
 
         psd = norm * (1 + (f / fc) ** 2) ** (-GAM / 2)
-        log10bpl = np.log10(psd.to_value('yr**3')) 
-        log10flat = (2 * log10_kappa) # * u.yr**3
-        #psd = np.maximum(psd, flat)
+        log10bpl = np.log10(psd.to_value("yr**3"))
+        log10flat = 2 * log10_kappa  # * u.yr**3
+        # psd = np.maximum(psd, flat)
 
         ln10 = np.log(10.0)
-        log10psd = logsumexp(
-            np.concatenate(
-                (log10bpl[:, None]* ln10, np.ones_like(log10bpl)[:, None] * log10flat * ln10), axis=1
-            ),
-            axis=1,
-        ) / ln10
-        psd = 10.0 ** log10psd * u.yr**3
+        log10psd = (
+            logsumexp(
+                np.concatenate(
+                    (
+                        log10bpl[:, None] * ln10,
+                        np.ones_like(log10bpl)[:, None] * log10flat * ln10,
+                    ),
+                    axis=1,
+                ),
+                axis=1,
+            )
+            / ln10
+        )
+        psd = 10.0**log10psd * u.yr**3
 
         return psd.to_value("s ** 2 * d")

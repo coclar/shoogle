@@ -150,8 +150,9 @@ class Gibbs(object):
         with open(self.parfile, "r") as par:
             lines = par.readlines()
             for l in lines:
-                if l.split()[0] == "LATPHASE":
-                    extra_phase = float(l.split()[1])
+                parts = l.split()
+                if parts and parts[0] == "LATPHASE":
+                    extra_phase = float(parts[1])
 
         self.Edep = Edep
         if self.Edep:
@@ -1150,8 +1151,8 @@ class Gibbs(object):
         progress.start_t = start_time
         progress.last_print_t = start_time
 
-        max_len = int(np.ceil(max_iterations / update)) * update
         update = int(np.ceil(update / chains)) * chains
+        max_len = int(np.ceil(max_iterations / update)) * update
 
         self.timing_chain = jnp.zeros((chains, max_len, self.n_timing_pars))
         self.template_chain = jnp.zeros((chains, max_len, len(self.tau_sampler.tau_0)))

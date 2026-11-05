@@ -131,8 +131,8 @@ def main(argv=None):
 
     if options.weightfield is None:
         weightfield = None
-        f = fits.open(options.ft1)
-        colnames = f[1].data.names
+        with fits.open(options.ft1) as f:
+            colnames = f[1].data.names
 
         for c in colnames:
             w = None

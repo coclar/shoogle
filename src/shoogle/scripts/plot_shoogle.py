@@ -91,8 +91,8 @@ def main(argv=None):
 
     if options.weightfield is None:
         weightfield = None
-        f = fits.open(options.ft1)
-        colnames = f[1].data.names
+        with fits.open(options.ft1) as f:
+            colnames = f[1].data.names
 
         for c in colnames:
             w = None
@@ -123,7 +123,15 @@ def main(argv=None):
     )
 
     res = GibbsResults(G)
-    res.load_results(load_from=[options.outputfile + ".npz"], decimated=True)
+
+    chain_files = sorted(glob.glob(options.outputfile + "_*.npz"))
+    if not chain_files:
+        print(
+            f"Error: no chain files found matching {options.outputfile}_*.npz",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    res.load_results(load_from=chain_files, decimated=options.decimated)
 
     res.write_tvsph(options.outputfile + "_MAP.tvsph", res.phi_MAP)
     res.write_new_template(options.outputfile + "_prof.dat")
