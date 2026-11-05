@@ -7,12 +7,9 @@ import jax.numpy as jnp
 from jaxopt import LBFGS
 import blackjax
 from optax.assignment import hungarian_algorithm
-from tqdm.auto import tqdm
 from astropy import units as u
 import pickle
-from pint.templates.lctemplate import LCTemplate, prim_io
-from pint.templates.lceprimitives import LCEGaussian
-from pint.templates.lcenorm import ENormAngles
+from pint.templates.lctemplate import LCTemplate
 import json
 
 ONE_OVER_SQRT2PI = 1.0 / (jnp.sqrt(2 * jnp.pi))
@@ -1270,8 +1267,6 @@ class LatentVariableSampler(object):
 
         # Prior probability that the photon came from the background
         B_i = 1 - self.w
-
-        norm = jnp.sum(A_ik, axis=1) + U_i + B_i  # should be unity
 
         return A_ik, U_i, B_i
 

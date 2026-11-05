@@ -1,23 +1,11 @@
-import sys
-import os
-import pickle
 import numpy as np
-import matplotlib.pyplot as plt
-import corner
-import emcee
 from tqdm.auto import tqdm
 import time, datetime
 
 from astropy import units as u
 from astropy.coordinates import Angle
 
-from scipy.stats import norm, multivariate_normal as mvn, Covariance, dirichlet
-from scipy.linalg import cholesky, cho_solve, solve
-
-from pint.templates.lctemplate import LCTemplate, prim_io
-from pint.templates.lceprimitives import LCGaussian
 from pint import toa
-from pint.eventstats import hmw
 from pint.models import get_model
 from pint.fermi_toas import get_Fermi_TOAs
 from pint.observatory.satellite_obs import SatelliteObs
@@ -25,12 +13,10 @@ import pint.logging
 
 pint.logging.setup(level="WARNING")
 
-from shoogle.plot_gibbs_results import GibbsResults, fermi_lc
 from shoogle.utils import *
-from shoogle.noise_models import BrokenPowerLaw, FlatTailBrokenPowerLaw
+from shoogle.noise_models import FlatTailBrokenPowerLaw
 from shoogle.conditional_samplers import *
 
-from blackjax import progress_bar
 from blackjax.diagnostics import effective_sample_size as ESS_fn
 import jax
 import jax.numpy as jnp
@@ -344,202 +330,6 @@ class Gibbs(object):
 
         return
 
-    def _lambda_emcee_logL_wrapper(self, x):
-
-        hyp = np.array([])
-
-        s = 0
-        log_prior = 0.0
-        for component in self.noise_models:
-            n = component.nfree
-
-            p = component.all_parameters(x[s : s + n])
-            if p is None:
-                return -np.inf
-
-            s += n
-            hyp = np.append(hyp, p)
-
-            log_prior += component.log_prior(p)
-
-        self._make_psd_cov(hyp)
-        post_cov_inv = self.MT_Sigma_inv_M + self.inv_prior_cov
-
-        try:
-            post_cov_inv_U = cholesky(post_cov_inv, lower=False)
-        except np.linalg.LinAlgError:
-            return None
-
-        self.post_cov_inv_U = post_cov_inv_U
-
-        self.theta_opt = cho_solve(
-            (post_cov_inv_U, False),
-            self.MT_Sigma_inv_resids + self.inv_prior_cov @ self.theta_prior,
-        )
-
-        prior_chi2 = self.theta_prior @ (self.inv_prior_cov @ self.theta_prior)
-        post_chi2 = self.theta_opt @ (post_cov_inv @ self.theta_opt)
-        self.logdet_post = -2 * np.sum(np.log(np.diag(post_cov_inv_U)))
-        logL = -0.5 * (self.logdet_prior + prior_chi2 - self.logdet_post - post_chi2)
-
-        # plt.plot(self.WXfreqs, 1.0/np.diag(self.inv_prior_cov)[6::2])
-        # plt.yscale('log')
-        # plt.xscale('log')
-        # plt.show()
-        # raise ValueError
-
-        # print(self.theta_prior)
-        # print(np.diag(self.inv_prior_cov))
-        # print(x,
-        #       "prior_chi2:", prior_chi2,
-        #       "logdet_prior:", self.logdet_prior,
-        #       "post_chi2:", post_chi2,
-        #       "logdet_post:", self.logdet_post)
-
-        return logL + log_prior
-
-    def _tune_lambda_sampler(self, hyp0, progress=True):
-
-        x0 = np.array([])
-        for component in self.noise_models:
-            x0 = np.append(x0, component.x0[component.free])
-
-        plt.ioff()
-        nwalkers = 32
-
-        ndim = len(x0)
-        cov = np.eye(ndim) * 1e-2
-
-        sampler = emcee.EnsembleSampler(nwalkers, ndim, self._lambda_emcee_logL_wrapper)
-        start = mvn.rvs(size=nwalkers, mean=x0, cov=cov)
-        if ndim == 1:
-            start = start.reshape(len(start), 1)
-
-        sampler.run_mcmc(
-            start,
-            2000,
-            progress=progress,
-            progress_kwargs={"desc": "Tuning hyperpar sampler, step 1 of 2"},
-        )
-
-        chain = sampler.get_chain(thin=25, discard=100, flat=True)
-
-        cov = np.cov(chain, rowvar=False)
-
-        sampler2 = emcee.EnsembleSampler(
-            1,
-            ndim,
-            self._lambda_emcee_logL_wrapper,
-            live_dangerously=True,
-            moves=[emcee.moves.GaussianMove(cov)],
-        )
-        x0 = chain[-1, :]
-        sampler2.run_mcmc(
-            x0,
-            20000,
-            progress=progress,
-            skip_initial_state_check=True,
-            progress_kwargs={"desc": "Tuning hyperpar sampler, step 2 of 2"},
-        )
-
-        chain2 = sampler2.get_chain(discard=1000, flat=True)
-
-        cov = np.cov(chain2, rowvar=False)
-
-        self.lambda_autocorr_time = int(
-            np.ceil(np.max(sampler2.get_autocorr_time(discard=1000)))
-        )
-        self.lambda_emcee_cov = cov
-
-    def _sample_lambda_given_z_tau(self, x0):
-
-        ndim = len(x0)
-
-        sampler = emcee.EnsembleSampler(
-            1,
-            ndim,
-            self._lambda_emcee_logL_wrapper,
-            live_dangerously=True,
-            moves=[emcee.moves.GaussianMove(self.lambda_emcee_cov)],
-        )
-        sampler.run_mcmc(
-            x0,
-            self.lambda_autocorr_time,
-            progress=False,
-            skip_initial_state_check=True,
-        )
-
-        lambda_new = sampler.get_chain(flat=True)[-1, :]
-
-        # Re-compute Cholesky matrix with last accepted sample
-        # (might not be the same as the last attempted sample, since that could have been rejected)
-        self._lambda_emcee_logL_wrapper(lambda_new)
-
-        c = 0
-        new_hyp = np.array([])
-        for component in self.noise_models:
-            n = component.nfree
-            new_hyp = np.append(new_hyp, lambda_new[c : c + n])
-            c += n
-
-        return new_hyp
-
-    def _sample_theta_given_lambda_z_tau(self):
-
-        p = mvn.rvs(mean=np.zeros_like(self.theta_opt))
-        theta = self.theta_opt + solve(self.post_cov_inv_U, p)
-        phase_shifts = self.M @ theta
-        mean_phase_shift = np.mean(phase_shifts)
-        phase_shifts -= mean_phase_shift
-
-        if hasattr(self, "radio_toas"):
-            radio_phase_shifts = self.Mradio @ (theta - self.theta_prior)
-            resids = np.append(resids, self.radio_resids - radio_phase_shifts)
-            radio_phase_shifts -= mean_phase_shift
-
-        return theta, phase_shifts
-
-    def _setup_leastsq_given_z_tau(self, mu_z, sigma_z):
-
-        npar = self.n_timing_pars
-
-        if self.has_OPV:
-            npar += self.nOPVfreqs * 2
-
-        # Setting up WLS with photons assigned to peaks
-        pulsed_photons = np.where(sigma_z > 0)[0]
-        M = np.copy(self.M[pulsed_photons])
-        resids = np.asarray(
-            self.phi[pulsed_photons] - mu_z[pulsed_photons], dtype=float
-        )
-        precisions = 1.0 / sigma_z[pulsed_photons] ** 2
-
-        if hasattr(self, "radio_toas"):
-            resids = np.append(resids, self.radio_resids)
-            precisions = np.append(precisions, self.radio_toa_uncerts**-2)
-            M = np.append(M, self.Mradio, axis=0)
-
-        MT_Sigma_inv = np.einsum("ij,j->ij", M.T, precisions, optimize="greedy")
-        self.resids = resids
-        self.Sigma_inv = precisions
-        self.logdet_Sigma = -np.sum(np.log(self.Sigma_inv))
-        self.MT_Sigma_inv_M = MT_Sigma_inv @ M
-        self.MT_Sigma_inv_resids = MT_Sigma_inv @ resids
-        self.sum_precisions = np.sum(precisions)
-
-    def _Htest_logL(self, tau, phase_shifts):
-
-        phi = np.mod(self.phi - phase_shifts, 1.0)
-
-        if self.Edep:
-            profile = self.tau_sampler.template(tau, phi, self.log10E)
-        else:
-            profile = self.tau_sampler.template(tau, phi)
-
-        logL = np.sum(np.log((1 - self.w) + self.w * profile))
-
-        return hmw(phi, self.w), logL
-
     def _make_wavex_frequencies(self):
 
         nWXfreqs = 0
@@ -795,11 +585,6 @@ class Gibbs(object):
 
         if hasattr(self, "radio_toas"):
             self.Mo_radio = np.zeros_like(self.Mradio)
-
-        c = self.timing_model.components
-
-        b = c[[x for x in c.keys() if x.startswith("Binary")][0]]
-        o = b.binary_instance.orbits_cls
 
         tasc_idx = np.where(self.timing_parameter_names == "TASC")[0][0]
         self.Mo[:, tasc_idx] = 86400.0
@@ -1109,7 +894,7 @@ class Gibbs(object):
                        and more text will be output to stdout
 
         outputfile   : str, default="chains"
-                       Results are stored in "<outputfile>.npz"
+                       Results are stored in "<outputfile>_<chain>.npz"
 
         resume       : bool, default=False
                        If resume=True, the sampler will load  <outputfile>.npz,
@@ -1130,7 +915,6 @@ class Gibbs(object):
             )
 
         state = self.initial_state
-        key = self.initial_key
 
         progress = tqdm(total=max_iterations, desc="Gibbs sampling", smoothing=0.0)
 

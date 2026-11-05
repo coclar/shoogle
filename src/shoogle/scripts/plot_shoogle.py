@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from astropy.io import fits
 
 from shoogle.gibbs_sampler import Gibbs
-from shoogle.plot_gibbs_results import GibbsResults, fermi_lc
+from shoogle.plot_gibbs_results import GibbsResults
 
 
 def main(argv=None):

@@ -8,8 +8,6 @@ from astropy.io import fits
 from shoogle.gibbs_sampler import Gibbs
 from shoogle.plot_gibbs_results import GibbsResults
 
-import glob
-
 
 def main(argv=None):
 

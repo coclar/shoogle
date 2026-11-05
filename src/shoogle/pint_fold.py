@@ -1,17 +1,7 @@
 from pint.models import get_model
-from pint.fermi_toas import get_Fermi_TOAs
-from pint.observatory.satellite_obs import SatelliteObs
-from pint.templates.lctemplate import LCTemplate, prim_io
-from pint.residuals import Residuals
-from pint import toa
 from pint import logging
-from astropy import units as u
-from astropy.time import Time
-from matplotlib.gridspec import GridSpec
 
-import sys
 import numpy as np
-import matplotlib.pyplot as plt
 
 from optparse import OptionParser
 

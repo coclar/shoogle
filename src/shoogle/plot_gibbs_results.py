@@ -3,21 +3,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy import units as u
-from scipy.special import gamma, logsumexp
 from scipy.stats import norm, multivariate_normal
-from scipy.linalg import cholesky, cho_solve, solve
-from sklearn.gaussian_process.kernels import Matern
-from sklearn.cluster import mean_shift
-from matplotlib.gridspec import GridSpec
 import copy
-import warnings
 import corner
-from emcee.autocorr import function_1d
-import sys
 
 from shoogle.utils import *
-from pint.templates.lctemplate import LCTemplate
-from pint.templates.lceprimitives import LCGaussian
 
 
 def fermi_lc(
@@ -44,11 +34,10 @@ def fermi_lc(
     sqerrors, bins = np.histogram(phases, xbins, weights=(weights**2.0))
     width = bins[1] - bins[0]
     bg = (weights.sum() - ((weights**2.0).sum())) / xbins
-    src = (weights**2.0).sum() / xbins
     errors = np.sqrt(sqerrors + np.max(weights**2))
 
     if ax is None:
-        fig, ax = plt.subplots(1, 1, figsize=(7.5, 5))
+        _, ax = plt.subplots(1, 1, figsize=(7.5, 5))
 
     ax.bar(
         np.append(bins[:-1], bins[:-1] + 1.0),
@@ -213,12 +202,12 @@ class GibbsResults(object):
                 if self.psr.has_OPV:
                     chains = np.append(chains, temp_opv_amps_chain, axis=1)
 
-                tau, j = acor(chains)
+                tau, _ = acor(chains)
                 steps = np.maximum(tau // decimate_factor, 10)
                 burnin = tau * 5
 
                 chains = chains[burnin:, :]
-                tau, j = acor(chains)
+                tau, _ = acor(chains)
                 steps = np.maximum(tau // decimate_factor, 10)
 
                 print(
@@ -757,8 +746,6 @@ class GibbsResults(object):
                 aspect=40,
             )
 
-        theta_MAP = np.concatenate((self.timing_MAP, self.opv_amps_MAP))
-
         TASCidx = np.where(self.parameter_names == "TASC")[0]
         try:
             FB0idx = np.where(self.parameter_names == "FB0")[0]
@@ -1010,7 +997,6 @@ class GibbsResults(object):
         X[:, 2] = 1.0
         # X[:, 3] = (t - np.mean(t)) / self.psr.Tobs
         # X[:, 4] = ((t - np.mean(t)) / self.psr.Tobs) ** 2
-        mu_PSD_cho = np.zeros(len(f))
 
         path1 = np.einsum_path("ij,jk", Kinv, X, optimize="optimal")[0]
         path2 = np.einsum_path("ij,jk", X.T, X, optimize="optimal")[0]

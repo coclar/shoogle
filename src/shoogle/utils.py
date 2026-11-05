@@ -1,8 +1,6 @@
-from scipy.special import gamma, logsumexp
+from scipy.special import gamma
 import numpy as np
 from sklearn.gaussian_process.kernels import Matern
-from pint.observatory.satellite_obs import SatelliteObs
-from pint.fermi_toas import load_Fermi_TOAs
 from emcee.autocorr import function_1d
 from astropy import units as u
 
