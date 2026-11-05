@@ -61,6 +61,24 @@ def unconstrained_to_dirichlet(x, K, alpha_P=1.0, alpha_U=1.0):
     This function can take vectors longer than K.
     Extra values are set to zero and ignored in prior calculations.
     This enables parallelisation via vmap over pulsars with different K.
+
+    Parameters
+    ----------
+    x          : jax.numpy.ndarray
+                 Unconstrained (logit) variables, length >= K.
+    K          : int
+                 Number of components.
+    alpha_P    : float, default = 1.0
+                 Dirichlet distribution hyperparameter for the pulsed components.
+    alpha_U    : float, default = 1.0
+                 Dirichlet distribution hyperparameter for the unpulsed component.
+
+    Returns
+    -------
+    A          : jax.numpy.ndarray
+                 Dirichlet components, with values beyond K set to zero.
+    log_prior  : float
+                 Log-prior for the components, including the logit Jacobian.
     """
 
     L = jnp.shape(x)[0]
@@ -107,6 +125,29 @@ def unconstrained_to_invgamma(x, K, logsmin, logsmax, alpha, beta):
     This can take vectors x that are longer than K.
     Extra values are set to 1.0 and ignored in prior calculations.
     This enables parallelisation via vmap over pulsars with different K.
+
+    Parameters
+    ----------
+    x          : jax.numpy.ndarray
+                 Unconstrained (logit) variables, length >= K.
+    K          : int
+                 Number of widths.
+    logsmin    : float
+                 Log of the minimum allowed width.
+    logsmax    : float
+                 Log of the maximum allowed width.
+    alpha      : float
+                 Inverse-gamma shape parameter.
+    beta       : float
+                 Inverse-gamma scale parameter.
+
+    Returns
+    -------
+    s          : jax.numpy.ndarray
+                 Widths, with values beyond K set to 1.0.
+    log_prior  : float
+                 Log-prior for the widths, including the Jacobian and the
+                 truncation renormalisation.
     """
 
     L = jnp.shape(x)[0]
@@ -146,9 +187,9 @@ def jax_template(tau, phases, K):
     Parameters
     ----------
 
-    tau        : jax.numpy.ndarray of dtype float32, shape (3 * npeaks,)
-                 Template pulse profile parameters, in order:
-                 (amplitudes, positions, widths)
+    tau        : jax.numpy.ndarray of dtype float32, shape (3 * L,)
+                 Template pulse profile parameters for L >= npeaks peaks,
+                 in order: (amplitudes, positions, widths)
 
                  Amplitudes should sum to < 1.0
                  Positions should be between (0,1)
@@ -159,6 +200,10 @@ def jax_template(tau, phases, K):
 
     phases     : jax.numpy.ndarray of dtype float32
                  Array of photon phases. Should all be between 0 and 1.
+
+    K          : int
+                 Number of peaks. Peaks beyond the first K have their
+                 amplitudes set to zero, so they do not contribute to the profile.
 
     Returns
     ---------
@@ -191,16 +236,16 @@ def jax_template(tau, phases, K):
 
 def jax_template_Edep(tau, phases, log10E_frac, K):
     """
-    Evaluates the pulse profile template at the provided phases.
+    Evaluates the energy-dependent pulse profile template at the provided phases.
 
     Parameters
     ----------
 
-    tau        : jax.numpy.ndarray of dtype float32, shape (3 * npeaks,)
+    tau        : jax.numpy.ndarray of dtype float32, shape (6 * npeaks,)
                  Template pulse profile parameters, in order:
-                 (amplitudes, positions, widths)
+                 (A_lo, mu_lo, sigma_lo, A_hi, mu_hi, sigma_hi)
 
-                 Amplitudes should sum to < 1.0
+                 The low- and high-energy amplitudes should each sum to < 1.0
                  Positions should be between (0,1)
                  Widths should be between the min and max values.
 
@@ -210,9 +255,12 @@ def jax_template_Edep(tau, phases, log10E_frac, K):
     phases     : jax.numpy.ndarray of dtype float32
                  Array of photon phases. Should all be between 0 and 1.
 
-    log10E     : jax.numpy.ndarray or None
-                 If None, uses the original log-energies
-                 Otherwise, evaluates at the specified log-energies
+    log10E_frac : jax.numpy.ndarray of dtype float32, shape (nphotons,)
+                 Fractional log-energy in [0, 1]; 0 gives the low-energy
+                 profile and 1 gives the high-energy profile.
+
+    K          : int
+                 Number of peaks.
 
     Returns
     ---------
@@ -346,19 +394,20 @@ class TemplateSampler(object):
         Parameters
         ----------
         proffile   : str
-                     Text file containing the initial pulse profile shape.
-                     This can be obtained using itemplate.py
+                     File containing the initial pulse profile shape
+                     (text, .pickle or .json). Text files can be obtained
+                     using itemplate.py
         weights    : np.ndarray, dtype = float
                      Photon probability weights
-        minsigma   : float, default = 0.005
+        minsigma   : float, default = 0.0001
                      Minimum width of a Gaussian peak in the pulse profile,
-                     in fractions of a rotation. (default = 0.5% of a rotation)
-        maxsigma   : float, default = 0.25
-                     Minimum width of a Gaussian peak in the pulse profile,
-                     in fractions of a rotation. (default = 25% of a rotation)
-        maxwraps   : int, default = 2
-                     Maximum number of phase wraps to sum over.
-                     More wraps = more accurate, but slower.
+                     in fractions of a rotation. (default = 0.01% of a rotation)
+        maxsigma   : float, default = 0.5
+                     Maximum width of a Gaussian peak in the pulse profile,
+                     in fractions of a rotation. (default = 50% of a rotation)
+        extra_phase : float or None, optional
+                     Additional phase shift applied to all template peak
+                     positions (e.g. from the LATPHASE parameter).
         """
         self.A_0, self.mu_0, self.sigma_0 = read_template(
             proffile, extra_phase=extra_phase
@@ -409,7 +458,7 @@ class TemplateSampler(object):
         phases    : array
                     Array of photon phases
                     Should be between (0,1), though this is not enforced.
-                    Values outside the range spanned by maxwraps will be incorrect
+                    Values outside the range spanned by MAXWRAPS will be incorrect
 
         Returns
         -------
@@ -440,11 +489,14 @@ class TemplateSampler(object):
         x    :   jax.numpy.ndarray
                  Location of the current point in the sample parameter space
 
+        hyp  :   jax.numpy.ndarray
+                 Template hyperparameters used by the prior transforms
+
         Returns
         ---------
 
         tau          : jax.numpy.ndarray
-                       Pulse profile parameters to pass to self._jax_template
+                       Pulse profile parameters to pass to jax_template
 
         logprior     : float
                        the log-prior for these parameters, accounting for both
@@ -529,8 +581,8 @@ class TemplateSampler(object):
         Computes the log-posterior probability of the template parameters
         given the observed photon phases and weights.
 
-        This combines the log-prior (from `self.samples_to_phys`) and the
-        log-likelihood (from `self.log_like`) evaluated at the current parameter
+        This combines the log-prior (from `self._samples_to_phys`) and the
+        log-likelihood (from `self._log_like`) evaluated at the current parameter
         values.
 
         Parameters
@@ -541,8 +593,9 @@ class TemplateSampler(object):
                      Shape: (3 * npeaks,)
         phases     : jax.numpy.ndarray
                      Array of observed photon phases (in [0, 1]).
-        weights    : jax.numpy.ndarray
-                     Array of photon probability weights (in [0, 1]).
+        hyp        : jax.numpy.ndarray
+                     Template hyperparameters (Dirichlet/inverse-gamma priors)
+                     used by self._samples_to_phys.
 
         Returns
         -------
@@ -589,15 +642,23 @@ class TemplateSampler(object):
 
     def setup_sampler(self, phases, rng_key):
         """
-        Performs a warm-up run to tune parameters (step size, covariance matrix)
-        of the blackjax NUTS sampler for efficient sampling later.
-
-        This also generates the
+        Optimises the template parameters with LBFGS, then performs a blackjax
+        NUTS window-adaptation warm-up to tune the step size and mass matrix
+        for efficient sampling later.
 
         Parameters
         ----------
         phases     : jax.numpy.ndarray
                      Array of observed photon phases (in [0, 1]).
+        rng_key    : jax PRNGKeyArray
+                     Random number key.
+
+        Returns
+        -------
+        tau        : jax.numpy.ndarray
+                     Physical template parameters after warm-up.
+        sample_key : jax PRNGKeyArray
+                     New random number key.
         """
 
         x0 = self._phys_to_samples(self.tau_0)
@@ -669,12 +730,20 @@ class TemplateSampler(object):
 
         Returns
         ----------
-        samples   :   jnp.ndarray of dtype float32
-                      NUTS samples, in the sampling parameter space
-                      These can be converted to physical parameters
-                      using self._samples_to_phys
+        sample     :   jnp.ndarray of dtype float32
+                       A new draw of the physical template parameters
+                       (amplitudes, positions, widths).
 
-        key       :   A new PRNG key
+        key        :   A new PRNG key
+
+        accept0    :   float
+                       Acceptance rate of the final NUTS step.
+
+        diverged0  :   bool
+                       Whether the final NUTS step diverged.
+
+        step_size  :   float
+                       Integration step size used for the final NUTS step.
         """
 
         x0 = self._phys_to_samples(tau)
@@ -777,6 +846,15 @@ class TemplateSampler(object):
 
         key        :  jax PRNGKeyArray
                       New random number key
+
+        accept0    :  float
+                      Acceptance rate of the final NUTS step
+
+        diverged0  :  bool
+                      Whether the final NUTS step diverged
+
+        step_size  :  float
+                      Integration step size used for the final NUTS step
         """
 
         sample, key, accept0, diverged0, step_size = self.sample(
@@ -806,15 +884,16 @@ class EdepTemplateSampler(TemplateSampler):
                      Photon probability weights
         log10E     : np.ndarray, dtype = float
                      Log-energies (in MeV units)
-        minsigma   : float, default = 0.005
+        minsigma   : float, default = 0.0001
                      Minimum width of a Gaussian peak in the pulse profile,
-                     in fractions of a rotation. (default = 0.5% of a rotation)
-        maxsigma   : float, default = 0.25
-                     Minimum width of a Gaussian peak in the pulse profile,
-                     in fractions of a rotation. (default = 25% of a rotation)
-        maxwraps   : int, default = 2
-                     Maximum number of phase wraps to sum over.
-                     More wraps = more accurate, but slower.
+                     in fractions of a rotation. (default = 0.01% of a rotation)
+        maxsigma   : float, default = 0.5
+                     Maximum width of a Gaussian peak in the pulse profile,
+                     in fractions of a rotation. (default = 50% of a rotation)
+        extra_phase : float or None, optional
+                     Additional phase shift applied to all template peak
+                     positions (e.g. from the LATPHASE parameter). Passed
+                     through **kwargs to TemplateSampler.
         """
 
         super().__init__(proffile, weights, **kwargs)
@@ -839,16 +918,16 @@ class EdepTemplateSampler(TemplateSampler):
 
         tau       : array
                     Template pulse profile parameters, in order:
-                    (amplitudes, positions, widths)
+                    (A_lo, mu_lo, sigma_lo, A_hi, mu_hi, sigma_hi)
 
-                    Amplitudes should sum to < 1.0
+                    The low- and high-energy amplitudes should each sum to < 1.0
                     Positions should be between (0,1)
                     Widths should be between the min and max values.
 
         phases    : array
                     Array of photon phases
                     Should be between (0,1), though this is not enforced.
-                    Values outside the range spanned by maxwraps will be incorrect
+                    Values outside the range spanned by MAXWRAPS will be incorrect
 
         log10E    : array
                     Array of photon log-energies
@@ -889,11 +968,14 @@ class EdepTemplateSampler(TemplateSampler):
         x    :   jax.numpy.ndarray
                  Location of the current point in the sample parameter space
 
+        hyp  :   jax.numpy.ndarray
+                 Template hyperparameters used by the prior transforms
+
         Returns
         ---------
 
         tau          : jax.numpy.ndarray
-                       Pulse profile parameters to pass to self._jax_template
+                       Pulse profile parameters to pass to jax_template
 
         logprior     : float
                        the log-prior for these parameters, accounting for both
@@ -1244,13 +1326,13 @@ class LatentVariableSampler(object):
         -------
 
         A_ik      : array, size = (nphotons, npeaks)
-                    Prior probabilities for each photon/peak pair
+                    Unnormalised prior weight for each photon/peak pair
 
         U_i       : array, size = (nphotons,)
-                    Prior probability for unpulsed component of pulsar flux
+                    Unnormalised prior weight for the unpulsed component
 
         B_i       : array, size = (nphotons,)
-                    Prior probability of photon coming from the background
+                    Unnormalised prior weight for the background
         """
 
         if len(tau) // 3 == 2 * self.npeaks:
@@ -1287,7 +1369,7 @@ class LatentVariableSampler(object):
         Returns
         -------
 
-        log_like  : Array, size = (nphotons, npeaks)
+        log_like  : Array, size = (nphotons, npeaks, nwraps)
                     Log-likelihood for photon--peak assignments
 
         mu        : Array, size = (1, npeaks) or (nphotons, npeaks)
@@ -1341,15 +1423,15 @@ class LatentVariableSampler(object):
         -------
 
         A_ik      : array, size = (nphotons, npeaks)
-                    Prior probabilities for each photon/peak pair
+                    Unnormalised prior weight for each photon/peak pair
 
         U_i       : array, size = (nphotons,)
-                    Prior probability for unpulsed component of pulsar flux
+                    Unnormalised prior weight for the unpulsed component
 
         B_i       : array, size = (nphotons,)
-                    Prior probability of photon coming from the background
+                    Unnormalised prior weight for the background
 
-        log_like  : Array, size = (nphotons, npeaks)
+        log_like  : Array, size = (nphotons, npeaks, nwraps)
                     Log-likelihood for photon--peak assignments
 
         rho       : Array, size = (nphotons, npeaks + 2)
@@ -1546,8 +1628,9 @@ class TimingModelSampler(object):
                          U = VD is the Cholesky decomposition of Cinv
 
         Dinv           : Array, size (npars)
-                         The inverse of the square-root of the diagonal of the posterior covariance matrix
-                         Used to scale/rescale the matrix for numerical stability.
+                         Square root of the diagonal of the posterior covariance
+                         matrix (i.e. the marginal posterior standard deviation),
+                         used to scale/rescale the matrix for numerical stability.
 
         logdet_prior   : float
                          Log of the determinant of the prior covariance matrix
@@ -1645,8 +1728,9 @@ def bpl_log10powspec(pars, freqs):
     Returns
     -------
 
-    PSD       : Array, size = (nfreq,)
-                Power-spectral density, in units of s^2 d
+    log10psd  : Array, size = (nfreq,)
+                log10 of the power-spectral density (with the PSD expressed
+                in units of s^2 d)
     """
 
     logA = pars[0]
@@ -1673,9 +1757,9 @@ def bpl_flattail_log10powspec(pars, freqs):
     Parameters
     ----------
 
-    pars      : Array, size = (3,) (or longer)
+    pars      : Array, size = (4,) (or longer)
                 PSD parameters: (log10A (log-amplitude at reference freq of 1/yr),
-                                 log10fc (log10 of corner frequency, in units 1/yr)
+                                 log10fc (log10 of corner frequency, in units 1/yr),
                                  gamma (spectral index),
                                  log10kappa (log-amplitude of flat tail))
 
@@ -1685,8 +1769,9 @@ def bpl_flattail_log10powspec(pars, freqs):
     Returns
     -------
 
-    PSD       : Array, size = (nfreq,)
-                Power-spectral density, in units of s^2 d
+    log10psd  : Array, size = (nfreq,)
+                log10 of the power-spectral density (with the PSD expressed
+                in units of s^2 d)
     """
 
     log10bpl = bpl_log10powspec(pars, freqs)
@@ -2053,14 +2138,26 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
         key         : JAX PRNG key
 
+        step_size   : float
+                      Step size to use for the NUTS sampler
+
         num_samples : Number of samples to draw, default = 1000
 
         Returns
         ----------
-        samples   :   Array
+        sample    :   Array
                       Hyperparameter samples
 
         key         : JAX PRNG key
+
+        accept0     : float
+                      Acceptance rate of the final NUTS step
+
+        diverged0   : bool
+                      Whether the final NUTS step diverged
+
+        step_size   : float
+                      Integration step size used for the final NUTS step
         """
 
         MT_Sigma_inv_M, MT_Sigma_inv_R = self.setup_leastsq_given_z_tau(mu_z, sigma_z)
@@ -2147,10 +2244,20 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
 
         key         : JAX PRNG key
 
+        accept0     : float
+                      Acceptance rate of the final hyperparameter NUTS step
+
+        diverged0   : bool
+                      Whether the final hyperparameter NUTS step diverged
+
+        step_size   : float
+                      Integration step size used for the final hyperparameter
+                      NUTS step
+
         """
 
         step_size = self.nuts_params["step_size"]
-        new_hyp, key, divergent, diverged0, step_size = self.sample(
+        new_hyp, key, accept0, diverged0, step_size = self.sample(
             hyp, mu_z, sigma_z, key, step_size, num_steps
         )
 
@@ -2161,4 +2268,4 @@ class NoiseAndTimingModelSampler(TimingModelSampler):
             mu_z, sigma_z, inv_prior_cov, key
         )
 
-        return new_hyp, theta, phase_shifts, key, divergent, diverged0, step_size
+        return new_hyp, theta, phase_shifts, key, accept0, diverged0, step_size

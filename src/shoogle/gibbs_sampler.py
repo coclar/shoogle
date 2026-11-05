@@ -62,7 +62,8 @@ class Gibbs(object):
         * Uses PINT to load the timing model from a .par file,
           folds the data to obtain an initial set of (pre-fit) phases,
           and evaluates the design matrix.
-        * Reads the .par file to identify noise-model hyperparamters to fit for.
+        * Uses the .par file to detect noise-model components and reads the
+          prior file to configure/fix/free their hyperparameters.
 
         Parameters
         ----------
@@ -88,6 +89,10 @@ class Gibbs(object):
                        Fit for energy-dependence in the gamma-ray pulse profile
                        Template peak parameters (amp, position, width) will be
                        linearly interpolated as a function of log10(E)
+        priorfile    : str, optional
+                       File specifying initial values, uncertainties/priors and
+                       free/fixed flags for noise-model hyperparameters.
+                       If None, no noise-model hyperparameters are included.
 
         """
 
@@ -855,57 +860,54 @@ class Gibbs(object):
         """
         Runs the Gibbs sampling loop.
 
-        The process will begin by running "tuning" MCMCs with emcee on the
-        template pulse profile parameters and hyperparameters to find
-        proposal covariance matrices and autocorrelation times for these
-        parameters. This step will be skipped if these attributes already exist
-        (i.e., if tuning has already been run):
-        tau_emcee_cov, tau_autocorr_time,
-        lambda_emcee_cov, lambda_autocorr_time
+        The first call sets up the sampler via _setup_sampler: the template is
+        optimised with LBFGS and blackjax NUTS window adaptation is used to tune
+        the step size and mass matrix (this is skipped if setup has already run).
 
-        After these tuning steps, the main sampling loop will run.
-
-        Every so often (after "update" iterations), the autocorrelation of the
-        sample chains time will be checked.
-
-        The sampler will run until "ntau_target" autocorrelation times have
-        been obtained, or "max_iterations" is reached.
+        The main loop then alternates template, latent-variable and
+        timing/noise-model updates. After every `update` samples (rounded up
+        to a multiple of `chains`), the minimum effective sample size (ESS)
+        across parameter groups is computed. Sampling stops when that minimum
+        ESS reaches `n_acor_target`, or after `max_iterations` samples.
 
 
         Parameters
         ----------
 
         n_acor_target : int, default=1000
-                       Number of autocorrelation times to run for.
-                       This determines the effective sample size of the chains.
+                       Target for the minimum effective sample size (ESS)
+                       across parameter groups.
                        Higher number = more robust results, but slower.
 
         update       : int, default=1000
-                       Number of samples between autocorrelation checks.
+                       Number of samples between ESS checks. Rounded up to a
+                       multiple of `chains`.
                        Should not be too small, as this can slow things down
 
         max_iterations : int, default=1000000
                          Max. number of iterations to run for, regardless of
-                         autocorrelation time criterion.
+                         the ESS criterion.
                          Default is very large, and should never really be met!
 
         plots        : bool, default=False
-                       If true, progress plots will be shown,
-                       and more text will be output to stdout
+                       Currently unused; retained for backwards compatibility
 
         outputfile   : str, default="chains"
                        Results are stored in "<outputfile>_<chain>.npz"
 
         resume       : bool, default=False
-                       If resume=True, the sampler will load  <outputfile>.npz,
-                       and will automatically resume from where it left off.
-                       It is up to the user to ensure that the timing model
-                       is consistent with the earlier run that is being resumed!
+                       Currently unused; retained for backwards compatibility
 
         num_NUTS_steps : int, default=1
                        Number of NUTS iterations to perform in the intermediate
                        template/hyperparameter sampling steps. Higher numbers are slower
                        but may lead to shorter overall autocorrelation times
+
+        chains       : int, default=16
+                       Number of chains to run in parallel.
+
+        seed         : int or None, default=None
+                       Random seed. If None, a time-based seed is used.
 
         """
 
