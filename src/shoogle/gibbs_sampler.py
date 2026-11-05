@@ -30,6 +30,8 @@ from shoogle.utils import *
 from shoogle.noise_models import BrokenPowerLaw, FlatTailBrokenPowerLaw
 from shoogle.conditional_samplers import *
 
+from blackjax import progress_bar
+from blackjax.diagnostics import effective_sample_size as ESS_fn
 import jax
 import jax.numpy as jnp
 
@@ -872,76 +874,11 @@ class Gibbs(object):
 
         self.Mo /= self.parameter_scales[None, :]
 
-    def sample(
-        self,
-        n_acor_target=1000,
-        update=1000,
-        max_iterations=1000000,
-        plots=False,
-        outputfile="chains",
-        resume=False,
-        num_NUTS_steps=1,
-        seed=None,
-    ):
-        """
-        Runs the Gibbs sampling loop.
-
-        The process will begin by running "tuning" MCMCs with emcee on the
-        template pulse profile parameters and hyperparameters to find
-        proposal covariance matrices and autocorrelation times for these
-        parameters. This step will be skipped if these attributes already exist
-        (i.e., if tuning has already been run):
-        tau_emcee_cov, tau_autocorr_time,
-        lambda_emcee_cov, lambda_autocorr_time
-
-        After these tuning steps, the main sampling loop will run.
-
-        Every so often (after "update" iterations), the autocorrelation of the
-        sample chains time will be checked.
-
-        The sampler will run until "ntau_target" autocorrelation times have
-        been obtained, or "max_iterations" is reached.
-
-
-        Parameters
-        ----------
-
-        n_acor_target : int, default=1000
-                       Number of autocorrelation times to run for.
-                       This determines the effective sample size of the chains.
-                       Higher number = more robust results, but slower.
-
-        update       : int, default=1000
-                       Number of samples between autocorrelation checks.
-                       Should not be too small, as this can slow things down
-
-        max_iterations : int, default=1000000
-                         Max. number of iterations to run for, regardless of
-                         autocorrelation time criterion.
-                         Default is very large, and should never really be met!
-
-        plots        : bool, default=False
-                       If true, progress plots will be shown,
-                       and more text will be output to stdout
-
-        outputfile   : str, default="chains"
-                       Results are stored in "<outputfile>.npz"
-
-        resume       : bool, default=False
-                       If resume=True, the sampler will load  <outputfile>.npz,
-                       and will automatically resume from where it left off.
-                       It is up to the user to ensure that the timing model
-                       is consistent with the earlier run that is being resumed!
-
-        num_NUTS_steps : int, default=1
-                       Number of NUTS iterations to perform in the intermediate
-                       template/hyperparameter sampling steps. Higher numbers are slower
-                       but may lead to shorter overall autocorrelation times
-
-        """
+    def _setup_sampler(self, seed=None, num_NUTS_steps=1):
 
         # Make sure template is phase-aligned with the data
         logL_max = 0
+        logL_fn = jax.jit(self.tau_sampler._log_like)
         for dphi in np.arange(-0.5, 0.5, 0.0001):
             tau = np.copy(self.tau_sampler.tau_0)
             tau[self.npeaks : 2 * self.npeaks] += dphi
@@ -953,12 +890,15 @@ class Gibbs(object):
                 tau[4 * self.npeaks : 5 * self.npeaks] = np.mod(
                     tau[4 * self.npeaks : 5 * self.npeaks], 1.0
                 )
-            logL = self.tau_sampler._log_like(jnp.array(tau), jnp.array(self.phi))
+
+            logL = logL_fn(jnp.array(tau), jnp.array(self.phi))
             if logL > logL_max:
                 logL_max = logL
                 tau_opt = jnp.array(tau)
 
         self.tau_sampler.tau_0 = tau_opt
+
+        print("Pre-fit log-likelihood:", logL_max)
 
         if seed is None:
             # 32-bit integer seed based on current POSIX microsecond
@@ -967,63 +907,19 @@ class Gibbs(object):
             )
         key = jax.random.key(seed)
 
-        if resume is True:
-            dat = np.load(outputfile + ".npz")
-            self.template_chain = dat["template_chain"]
+        tau = self.tau_sampler.tau_0
 
-            tau = self.template_chain[-1]
-            self.tau_sampler.tau_0 = np.array(tau)
-
-            self.loglike_chain = dat["loglike_chain"]
-            self.timing_chain = dat["timing_chain"]
-            if self.has_OPV:
-                self.opv_amps_chain = dat["opv_amps_chain"]
-
-                theta = np.concatenate(
-                    (self.timing_chain[-1, :], self.opv_amps_chain[-1, :])
-                )
-            else:
-                theta = self.timing_chain[-1, :]
-            phase_shifts = self.M @ theta
-            phase_shifts -= np.mean(phase_shifts)
-
-            if self.nhyp > 0:
-                self.hyp_chain = dat["hyp_chain"]
-                hyp = self.hyp_chain[-1]
-                mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
-                    tau, jnp.array(self.phi - phase_shifts), key
-                )
-                self.timing_sampler.hyp_0 = hyp
-            else:
-                hyp = np.array([])
-                for component in self.noise_models:
-                    hyp = np.append(hyp, component.x0)
-                self._make_psd_cov(hyp)
+        if self.nhyp > 0:
+            hyp = np.array([])
+            for component in self.noise_models:
+                hyp = np.append(hyp, component.x0[component.free])
         else:
-            self.timing_chain = np.zeros((update, self.n_timing_pars))
-            tau = self.tau_sampler.tau_0
+            hyp = np.array([])
+            for component in self.noise_models:
+                hyp = np.append(hyp, component.x0)
+            self._make_psd_cov(hyp)
 
-            if self.has_OPV:
-                self.opv_amps_chain = np.zeros((update, self.nOPVfreqs * 2))
-
-            if self.nhyp > 0:
-                self.hyp_chain = np.zeros((update, self.nhyp))
-                hyp = np.array([])
-                for component in self.noise_models:
-                    hyp = np.append(hyp, component.x0[component.free])
-            else:
-                hyp = np.array([])
-                for component in self.noise_models:
-                    hyp = np.append(hyp, component.x0)
-                self._make_psd_cov(hyp)
-
-            self.template_chain = np.zeros((update, len(self.tau_sampler.tau_0)))
-            self.loglike_chain = np.zeros(update)
-            phase_shifts = jnp.zeros(self.nphot)
-
-        if plots:
-            plt.ion()
-            fig, ax = plt.subplots(1, 3, figsize=(15, 5))
+        phase_shifts = jnp.zeros(self.nphot)
 
         if self.nhyp > 0:
             all_hyp = self.timing_sampler._fill_noise_pars(hyp)
@@ -1049,25 +945,24 @@ class Gibbs(object):
 
             return phase_shifts, logL, key
 
-        print("Optimising timing model with fixed template")
         for it in range(100):
             phase_shifts, logL, key = warmup_loop(phase_shifts, tau, key)
             if it == 0:
                 logL0 = logL
-        print(f"logL : {logL0:.2f} -> {logL:.2f}")
+        print(f"Timing model fit with fixed template, logL : {logL0:.2f} -> {logL:.2f}")
 
         if not hasattr(self.tau_sampler, "kernel"):
-            print("Setting up template sampler")
             tau, key = self.tau_sampler.setup_sampler(jphi - phase_shifts, key)
             print()
 
         if self.nhyp > 0:
-            print("Re-optimising timing model with burnt-in template")
             for it in range(100):
                 phase_shifts, logL, key = warmup_loop(phase_shifts, tau, key)
                 if it == 0:
                     logL0 = logL
-            print(f"logL : {logL0:.2f} -> {logL:.2f}")
+            print(
+                f"Timing model fit with burnt-in template, logL : {logL0:.2f} -> {logL:.2f}"
+            )
 
             mu_z, sigma_z, key = self.zm_sampler.sample_z_given_theta_tau(
                 tau, jphi - phase_shifts, key
@@ -1075,10 +970,8 @@ class Gibbs(object):
 
             self.timing_sampler.hyp_0 = jnp.array(hyp)
             if not hasattr(self.timing_sampler, "kernel"):
-                print("Setting up hyper-parameter sampler")
                 hyp, key = self.timing_sampler.setup_sampler(mu_z, sigma_z, key)
                 print()
-        c = 0
 
         if self.nhyp > 0:
             state = (phase_shifts, tau, hyp)
@@ -1159,107 +1052,205 @@ class Gibbs(object):
                     logL,
                 )
 
-        print("JIT-compiling the Gibbs sampler")
-        state, samples = gibbs_sampling_loop(state, key)
+        return state, gibbs_sampling_loop, key
 
-        progress = tqdm(
-            total=n_acor_target * update, desc="Gibbs sampling", smoothing=0.0
-        )
+    def sample(
+        self,
+        n_acor_target=1000,
+        update=1000,
+        max_iterations=1000000,
+        plots=False,
+        outputfile="chains",
+        resume=False,
+        num_NUTS_steps=1,
+        seed=None,
+        chains=16,
+    ):
+        """
+        Runs the Gibbs sampling loop.
+
+        The process will begin by running "tuning" MCMCs with emcee on the
+        template pulse profile parameters and hyperparameters to find
+        proposal covariance matrices and autocorrelation times for these
+        parameters. This step will be skipped if these attributes already exist
+        (i.e., if tuning has already been run):
+        tau_emcee_cov, tau_autocorr_time,
+        lambda_emcee_cov, lambda_autocorr_time
+
+        After these tuning steps, the main sampling loop will run.
+
+        Every so often (after "update" iterations), the autocorrelation of the
+        sample chains time will be checked.
+
+        The sampler will run until "ntau_target" autocorrelation times have
+        been obtained, or "max_iterations" is reached.
+
+
+        Parameters
+        ----------
+
+        n_acor_target : int, default=1000
+                       Number of autocorrelation times to run for.
+                       This determines the effective sample size of the chains.
+                       Higher number = more robust results, but slower.
+
+        update       : int, default=1000
+                       Number of samples between autocorrelation checks.
+                       Should not be too small, as this can slow things down
+
+        max_iterations : int, default=1000000
+                         Max. number of iterations to run for, regardless of
+                         autocorrelation time criterion.
+                         Default is very large, and should never really be met!
+
+        plots        : bool, default=False
+                       If true, progress plots will be shown,
+                       and more text will be output to stdout
+
+        outputfile   : str, default="chains"
+                       Results are stored in "<outputfile>.npz"
+
+        resume       : bool, default=False
+                       If resume=True, the sampler will load  <outputfile>.npz,
+                       and will automatically resume from where it left off.
+                       It is up to the user to ensure that the timing model
+                       is consistent with the earlier run that is being resumed!
+
+        num_NUTS_steps : int, default=1
+                       Number of NUTS iterations to perform in the intermediate
+                       template/hyperparameter sampling steps. Higher numbers are slower
+                       but may lead to shorter overall autocorrelation times
+
+        """
+
+        if not hasattr(self, "gibbs_sampling_loop"):
+            self.initial_state, self.gibbs_sampling_loop, self.initial_key = (
+                self._setup_sampler(seed, num_NUTS_steps)
+            )
+
+        state = self.initial_state
+        key = self.initial_key
+
+        progress = tqdm(total=max_iterations, desc="Gibbs sampling", smoothing=0.0)
+
+        def update_progress(steps):
+            progress.update(int(steps))
+
+        def sample_chains(states, keys):
+            states, samples = jax.vmap(self.gibbs_sampling_loop)(states, keys)
+            jax.debug.callback(update_progress, chains)
+            return states, samples
+
+        @jax.jit
+        def sample_batch(states, keys):
+            state, samples = jax.lax.scan(sample_chains, states, keys)
+            return state, samples
+
         start_time = time.time()
         progress.start_t = start_time
         progress.last_print_t = start_time
 
-        keys = jax.random.split(key, update + 1)
-        key = keys[-1]
-        while (c < update or n_acor < n_acor_target) and (c < max_iterations):
+        max_len = int(np.ceil(max_iterations / update)) * update
+        update = int(np.ceil(update / chains)) * chains
 
-            if c == len(self.loglike_chain):
-                keys = jax.random.split(key, update + 1)
-                key = keys[-1]
+        self.timing_chain = jnp.zeros((chains, max_len, self.n_timing_pars))
+        self.template_chain = jnp.zeros((chains, max_len, len(self.tau_sampler.tau_0)))
+        self.loglike_chain = jnp.zeros((chains, max_len))
 
-                self.loglike_chain = np.append(self.loglike_chain, np.zeros(update))
-                self.timing_chain = np.append(
-                    self.timing_chain, np.zeros((update, self.n_timing_pars)), axis=0
-                )
+        if self.nhyp > 0:
+            self.hyp_chain = jnp.zeros((chains, max_len, self.nhyp))
 
-                self.template_chain = np.append(
-                    self.template_chain,
-                    np.zeros((update, len(self.tau_sampler.tau_0))),
-                    axis=0,
-                )
+        if self.has_OPV:
+            self.opv_amps_chain = jnp.zeros((chains, max_len, 2 * self.nOPVfreqs))
 
-                if self.has_OPV:
-                    self.opv_amps_chain = np.append(
-                        self.opv_amps_chain,
-                        np.zeros((update, self.nOPVfreqs * 2)),
-                        axis=0,
-                    )
-                if self.nhyp > 0:
-                    self.hyp_chain = np.append(
-                        self.hyp_chain, np.zeros((update, self.nhyp)), axis=0
-                    )
+        c = 0
+        n_acor = 0
 
-            state, samples = gibbs_sampling_loop(state, keys[c % update])
+        next_keys = jax.random.split(self.initial_key, chains)
 
-            tau = samples[0]
-            if np.any(np.isnan(tau)):
-                print(tau)
+        states = jax.tree.map(
+            lambda x: jnp.repeat(jnp.expand_dims(x, axis=0), chains, axis=0), state
+        )
+
+        tau_diverged = 0
+        hyp_diverged = 0
+
+        headings1 = ["Samples", "Eff. samples", "Eff. samples"]
+        headings2 = ["", "(templates)", "(timing)"]
+        if self.nhyp > 0:
+            headings1 += ["Eff. samples"]
+            headings2 += ["(hyperpars)"]
+        if self.has_OPV:
+            headings1 += ["Eff. samples"]
+            headings2 += ["(OPVs)"]
+
+        headings1 += ["Divergences"]
+        headings2 += ["(templates)"]
+
+        if self.nhyp > 0:
+            headings1 += ["Divergences"]
+            headings2 += ["(hyperpars)"]
+
+        colfmt = "{:^14}"
+        heading_line1 = "|" + "|".join(colfmt.format(head) for head in headings1) + "|"
+        heading_line2 = "|" + "|".join(colfmt.format(head) for head in headings2) + "|"
+
+        tqdm.write(heading_line1)
+        tqdm.write(heading_line2)
+        tqdm.write("-" * len(heading_line2))
+
+        batch_steps = update // chains
+
+        while (n_acor < n_acor_target) and (c < max_len):
+            keys = (
+                jax.vmap(jax.random.split, (0, None))(next_keys, (batch_steps + 1))
+            ).reshape(batch_steps + 1, chains)
+            next_keys = keys[-1]
+
+            states, samples = sample_batch(states, keys[:-1])
+
+            tau = samples[0].swapaxes(0, 1)
+            if jnp.any(jnp.isnan(tau)):
                 raise ValueError("Error: found a NaN in the template samples")
 
-            tau_accept0 = samples[1]
-            tau_diverged0 = samples[2]
-            tau_step_size = samples[3]
+            tau_diverged += jnp.sum(samples[2])
 
-            if tau_diverged0:
-                print(
-                    "Template sampler divergence: ",
-                    tau_accept0,
-                    tau_diverged0,
-                    tau_step_size,
-                )
-
-            theta = samples[4]
-            logL = samples[5]
+            theta = samples[4].swapaxes(0, 1)
+            logL = samples[5].swapaxes(0, 1)
 
             if self.nhyp > 0:
-                hyp = samples[6]
-                hyp_accept0 = samples[7]
-                hyp_diverged0 = samples[8]
-                hyp_step_size = samples[9]
+                hyp = samples[6].swapaxes(0, 1)
+                hyp_diverged += jnp.sum(samples[8])
 
-                if hyp_diverged0:
-                    print(
-                        "Template sampler divergence: ",
-                        hyp_accept0,
-                        hyp_diverged0,
-                        hyp_step_size,
-                    )
-
-                if np.any(np.isnan(hyp)):
+                if jnp.any(jnp.isnan(hyp)):
                     raise ValueError("Error: found a NaN in the hyperparameter samples")
 
-            if np.any(np.isnan(theta)):
-                print("Tau:", tau)
-                print("theta:", theta)
+            if jnp.any(jnp.isnan(theta)):
                 raise ValueError("Error: found a NaN in the timing samples")
 
-            self.timing_chain[c] = theta[: self.n_timing_pars]
-            self.template_chain[c] = tau
-            self.loglike_chain[c] = logL
+            self.timing_chain = self.timing_chain.at[:, c : c + batch_steps, :].set(
+                theta[:, :, : self.n_timing_pars]
+            )
+            self.template_chain = self.template_chain.at[:, c : c + batch_steps, :].set(
+                tau
+            )
+            self.loglike_chain = self.loglike_chain.at[:, c : c + batch_steps].set(logL)
 
             if self.has_OPV:
-                self.opv_amps_chain[c] = theta[self.n_timing_pars :]  # -self.npeaks]
+                self.opv_amps_chain = self.opv_amps_chain.at[
+                    :, c : c + batch_steps, :
+                ].set(theta[:, :, self.n_timing_pars :])
 
             if self.nhyp > 0:
-                self.hyp_chain[c] = hyp
+                self.hyp_chain = self.hyp_chain.at[:, c : c + batch_steps, :].set(hyp)
 
-            if c % update == update - 1:
-
+            for chain in range(chains):
                 output_dict = {
                     "seed": seed,
-                    "loglike_chain": self.loglike_chain[: c + 1],
-                    "timing_chain": self.timing_chain[: c + 1],
-                    "template_chain": self.template_chain[: c + 1],
+                    "chain_index": chain,
+                    "loglike_chain": self.loglike_chain[chain, : c + batch_steps],
+                    "timing_chain": self.timing_chain[chain, : c + batch_steps],
+                    "template_chain": self.template_chain[chain, : c + batch_steps],
                     "parameter_scales": self.parameter_scales,
                     "parameter_names": self.timing_parameter_names,
                     "timing_parameter_values": self.timing_parameter_values,
@@ -1268,117 +1259,57 @@ class Gibbs(object):
 
                 if self.has_OPV:
                     output_dict_opv = {
-                        "opv_amps_chain": self.opv_amps_chain[: c + 1],
+                        "opv_amps_chain": self.opv_amps_chain[chain, : c + batch_steps],
                         "opv_freqs": self.OPVfreqs,
                     }
                     output_dict.update(output_dict_opv)
 
                 if self.nhyp > 0:
                     output_dict_hyp = {
-                        "hyp_chain": self.hyp_chain[: c + 1],
+                        "hyp_chain": self.hyp_chain[chain, : c + batch_steps]
                     }
                     output_dict.update(output_dict_hyp)
 
-                np.savez(outputfile, **output_dict)
+                of = outputfile + f"_{chain:d}"
+                np.savez(of, **output_dict)
 
-                start = 0
+            ESS_tau = int(ESS_fn(self.template_chain[:, : c + batch_steps]).min())
+            ESS_theta = int(ESS_fn(self.timing_chain[:, : c + batch_steps]).min())
 
-                all_chains = self.timing_chain[start:c]
-                # np.concatenate(
-                #    (self.timing_chain[start:c], self.template_chain[start:c]), axis=1
-                # )
+            vals = [(c + batch_steps) * chains, ESS_tau, ESS_theta]
 
-                if self.nhyp > 0:
-                    all_chains = np.concatenate(
-                        (
-                            all_chains,
-                            self.hyp_chain[start:c],
-                        ),
-                        axis=1,
-                    )
+            ESS_all = jnp.array([ESS_theta])
 
-                if self.has_OPV:
-                    all_chains = np.concatenate(
-                        (
-                            all_chains,
-                            self.opv_amps_chain[start:c],
-                        ),
-                        axis=1,
-                    )
+            if self.nhyp > 0:
+                ESS_hyp = int(ESS_fn(self.hyp_chain[:, : c + batch_steps]).min())
+                ESS_all = jnp.append(ESS_all, ESS_hyp)
+                vals.append(ESS_hyp)
 
-                if self.fit_TN:
-                    all_chains = np.concatenate(
-                        (
-                            all_chains,
-                            self.hyp_chain[start:c],
-                        ),
-                        axis=1,
-                    )
+            if self.has_OPV:
+                ESS_OPV = int(ESS_fn(self.opv_amps_chain[:, : c + batch_steps]).min())
+                ESS_all = jnp.append(ESS_all, ESS_OPV)
+                vals.append(ESS_OPV)
 
-                acor_time, j = acor(all_chains)
+            vals.append(tau_diverged)
+            if self.nhyp > 0:
+                vals.append(hyp_diverged)
+            data_fmt = "{:>14}"
+            info_line = "|" + "|".join(data_fmt.format(val) for val in vals) + "|"
+            tqdm.write(info_line)
 
-                if plots:
-                    print(
-                        c,
-                        "Autocorr time = ",
-                        acor_time,
-                        "Estimated steps required:",
-                        acor_time * n_acor_target,
-                    )
-                    sys.stdout.flush()
-                else:
-                    progress.reset(total=acor_time * n_acor_target)
-                    progress.start_t = start_time
-                    progress.last_print_t = start_time
-                    progress.update(c)
-                    progress.refresh()
+            ESS_min = np.min(ESS_all)
+            n_acor = ESS_min
+            c += batch_steps
 
-                n_acor = (c + 1 - start) / acor_time
+            acor_time = c / n_acor
 
-                if plots:
-                    ax[0].clear()
-                    ax[1].clear()
-                    for i in range(self.n_timing_pars):
-                        param = (
-                            self.timing_chain[:c, i] - np.mean(self.timing_chain[:c, i])
-                        ) / np.std(self.timing_chain[:c, i])
-                        ax[0].plot(i * 5 + param, color="black")
+            progress.reset(
+                total=int(jnp.ceil(acor_time * n_acor_target / batch_steps))
+                * batch_steps
+                * chains
+            )
+            progress.start_t = start_time
+            progress.last_print_t = start_time
 
-                    for i in range(self.npeaks * 3):
-                        param = (
-                            self.template_chain[:c, i]
-                            - np.mean(self.template_chain[:c, i])
-                        ) / np.std(self.template_chain[:c, i])
-                        ax[0].plot(-5 - i * 5 + param, color=f"C{i//self.npeaks}")
-
-                    for i in range(self.nhyp):
-
-                        param = (
-                            self.hyp_chain[:c, i] - np.mean(self.hyp_chain[:c, i])
-                        ) / np.std(self.hyp_chain[:c, i])
-                        ax[0].plot(
-                            -5 - i * 5 - (self.npeaks * 3) * 5 + param,
-                            color=f"C{self.npeaks + i + 1}",
-                        )
-
-                    ax[0].set_xlabel("Iteration")
-                    ax[0].set_ylabel("Chains")
-                    ax[1].plot(self.loglike_chain[:c])
-                    ax[1].set_xlabel("Iteration")
-                    ax[1].set_ylabel("Loglikelihood")
-                    ax[2].scatter(c, acor_time * n_acor_target, color="red")
-                    ax[2].scatter(c, (c - start), color="green", marker="^")
-                    ax[2].set_xlabel("Iteration")
-                    ax[2].set_ylabel("Estimated iterations required")
-
-                    plt.pause(0.01)
-                    plt.draw()
-                    plt.pause(0.01)
-
-            c += 1
-            if not plots:
-                progress.update(1)
-                progress.refresh()
-
-        plt.ioff()
-        plt.show()
+            progress.update(c * chains)
+            progress.refresh()

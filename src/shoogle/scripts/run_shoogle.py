@@ -8,6 +8,8 @@ from astropy.io import fits
 from shoogle.gibbs_sampler import Gibbs
 from shoogle.plot_gibbs_results import GibbsResults
 
+import glob
+
 
 def main(argv=None):
 
@@ -114,6 +116,13 @@ def main(argv=None):
         default=1,
         help="Number of NUTS steps to take in each intermediate sampling stage (default=1). More steps are slower, but possibly more efficient by reducing the overall Gibbs sampling autocorrelation time. ",
     )
+    parser.add_option(
+        "-C",
+        "--chains",
+        type=int,
+        default=16,
+        help="Number of independent chains to run",
+    )
     (options, args) = parser.parse_args(argv)
 
     if options.outputfile is None:
@@ -161,10 +170,13 @@ def main(argv=None):
         update=options.update,
         seed=options.seed,
         num_NUTS_steps=options.steps,
+        chains=options.chains,
     )
 
     res = GibbsResults(G)
-    res.load_results(load_from=[options.outputfile + ".npz"], decimated=True)
+
+    chain_files = [options.outputfile + f"_{c}.npz" for c in range(options.chains)]
+    res.load_results(load_from=chain_files, decimated=True)
 
     res.write_tvsph(options.outputfile + "_MAP.tvsph", res.phi_MAP)
     res.write_new_template(options.outputfile + "_prof.dat")

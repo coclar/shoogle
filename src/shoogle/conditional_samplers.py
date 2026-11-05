@@ -604,8 +604,8 @@ class TemplateSampler(object):
         """
 
         x0 = self._phys_to_samples(self.tau_0)
-        logprob_fn = lambda x: self._log_post(x, phases, self.default_hyp)
-        neg_logprob_fn = lambda x: -self._log_post(x, phases, self.default_hyp)
+        logprob_fn = jax.jit(lambda x: self._log_post(x, phases, self.default_hyp))
+        neg_logprob_fn = jax.jit(lambda x: -self._log_post(x, phases, self.default_hyp))
 
         logL0 = logprob_fn(x0)
         optimiser = LBFGS(neg_logprob_fn)
