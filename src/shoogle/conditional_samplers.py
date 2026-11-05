@@ -389,7 +389,7 @@ class TemplateSampler(object):
         self.maxlogsigma = jnp.log(maxsigma)
         self.w = jnp.array(weights)
 
-        self.default_hyp = jnp.array([1.0, 1.0, 1.0, 0.5, 3.0])
+        self.default_hyp = jnp.array([1.0, 0.1, 1.0, 0.5, 3.0])
 
     def template(self, tau, phases):
         """
